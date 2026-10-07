@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+runs/
+eval/
+datasets/
+data/coco/
+*.pth
