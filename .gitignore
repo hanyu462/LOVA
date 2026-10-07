@@ -5,3 +5,5 @@ eval/
 datasets/
 data/coco/
 *.pth
+.venv/
+infer_out*.png
