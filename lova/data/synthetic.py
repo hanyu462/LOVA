@@ -21,9 +21,10 @@ class SyntheticPointerDataset(Dataset):
     num_classes = len(SHAPES) * len(TINTS)
 
     def __init__(self, length: int = 512, img_size: int = 256, max_objects: int = 6, seed: int = 0,
-                 max_pos: int = 256):
+                 max_pos: int = 256, pointer_mode: str = "uniform", pointers_per_image: int = 1):
         assert img_size % 32 == 0
         self.length, self.size, self.max_objects, self.seed, self.max_pos = length, img_size, max_objects, seed, max_pos
+        self.pointer_mode, self.pointers_per_image = pointer_mode, pointers_per_image
 
     def __len__(self):
         return self.length
@@ -64,4 +65,5 @@ class SyntheticPointerDataset(Dataset):
         g = torch.Generator().manual_seed(self.seed * 7919 + index)
         return finalize(image, valid4, masks4, classes, self.num_classes,
                         {**meta, "scale": 1.0, "offset": (0, 0), "new_size": (self.size, self.size), "flip": False},
-                        pointed=pointed, generator=g, max_pos=self.max_pos)
+                        pointed=pointed, generator=g, max_pos=self.max_pos, pointer_mode=self.pointer_mode,
+                        pointers_per_image=self.pointers_per_image if pointed is None else 1)

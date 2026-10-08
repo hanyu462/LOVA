@@ -48,6 +48,8 @@ def get_args():
     p.add_argument("--coco-root", default="data/coco")
     p.add_argument("--img-size", type=int, default=None)
     p.add_argument("--r-mode", default="pred")
+    p.add_argument("--pointer-mode", choices=["uniform", "interior"], default="uniform",
+                   help="eval pointer sampling; keep the same across checkpoints you compare")
     p.add_argument("--gate-mode", default=None, choices=["depth", "binary", "hard", "linear", "none"],
                    help="override gate mode at eval (thresholds stay as trained)")
     p.add_argument("--sweep", type=int, default=0)
@@ -221,10 +223,10 @@ def main():
 
     if a.data == "synthetic":
         from lova.data.synthetic import SyntheticPointerDataset
-        ds = SyntheticPointerDataset(200, img_size, seed=1)
+        ds = SyntheticPointerDataset(200, img_size, seed=1, pointer_mode=a.pointer_mode)
     else:
         from lova.data.coco import COCOPointerDataset
-        ds = COCOPointerDataset(a.coco_root, "val2017", img_size, train=False)
+        ds = COCOPointerDataset(a.coco_root, "val2017", img_size, train=False, pointer_mode=a.pointer_mode)
     n_img = min(len(ds), a.max_images) if a.max_images else len(ds)
 
     # Build (index, pointed) jobs.

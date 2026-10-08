@@ -24,7 +24,8 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from lova.data.common import collate
-from lova.losses import instance_loss, r_losses, r_stats
+from lova.data.rtarget import lam_cells, r_profile
+from lova.losses import instance_loss, r_losses, r_profile_loss, r_stats
 from lova.models.model import LOVAv0
 from lova.rsampler import sample_r
 
@@ -78,6 +79,20 @@ def get_args(argv=None):
     p.add_argument("--budget-extra", type=float, default=0.15)
     p.add_argument("--r-sup-floor", type=float, default=0.1,
                    help="phase C: R-sup weights decay linearly to this fraction")
+    # R pseudo-GT profile (phase B/C): R* = 1 -> r_b inside the pointed mask, r_b * exp(-d/lambda) outside
+    p.add_argument("--r-target", choices=["legacy", "profile"], default="legacy",
+                   help="legacy = L_R_in (lower bound) + weak L_R_out; profile = regress R onto R* "
+                        "(weight --w-r-in, decays in phase C like legacy). Budget is kept in both")
+    p.add_argument("--r-b", type=float, default=0.7, help="profile: R* on the object boundary")
+    p.add_argument("--r-gamma", type=float, default=0.7, help="profile: interior ramp exponent")
+    p.add_argument("--r-lam-frac", type=float, default=0.05, help="profile: lambda = frac * img_size (px)")
+    p.add_argument("--r-profile-mode", choices=["dt", "euclid"], default="dt")
+    p.add_argument("--r-loss", choices=["bce", "mse"], default="bce")
+    # pointer sampling
+    p.add_argument("--pointer-mode", choices=["uniform", "interior"], default="uniform",
+                   help="interior = never right at the mask boundary (depth >= 25%% of max)")
+    p.add_argument("--pointers-per-image", type=int, default=1,
+                   help="K pointers (on different instances) per image in a batch; samples = bs * K")
     # synthetic
     p.add_argument("--synthetic-len", type=int, default=2000)
     a = p.parse_args(argv)
@@ -95,9 +110,11 @@ def get_args(argv=None):
 def build_dataset(a, train=True):
     if a.data == "synthetic":
         from lova.data.synthetic import SyntheticPointerDataset
-        return SyntheticPointerDataset(a.synthetic_len if train else 200, a.img_size, seed=0 if train else 1)
+        return SyntheticPointerDataset(a.synthetic_len if train else 200, a.img_size, seed=0 if train else 1,
+                                       pointer_mode=a.pointer_mode, pointers_per_image=a.pointers_per_image)
     from lova.data.coco import COCOPointerDataset
-    return COCOPointerDataset(a.coco_root, a.train_split if train else "val2017", a.img_size, train=train)
+    return COCOPointerDataset(a.coco_root, a.train_split if train else "val2017", a.img_size, train=train,
+                              pointer_mode=a.pointer_mode, pointers_per_image=a.pointers_per_image)
 
 
 def to_device(batch, dev):
@@ -151,8 +168,19 @@ def compute_loss(model, batch, a, progress):
         if a.budget_on == "gate":
             tau = 0.5 if a.gate_mode == "binary" else m.backbone.stages[0].blocks[0].tau
             exec_map = torch.sigmoid((r.float() - tau) / m.backbone.gate_temp)
-        losses.update(r_losses(r, batch["pointed_mask4"], batch["valid4"],
-                               a.w_r_in * decay, a.w_r_out * decay, a.w_budget, a.budget_extra, exec_map=exec_map))
+        if a.r_target == "profile":
+            with torch.no_grad():
+                r_star = r_profile(batch["pointed_mask4"], batch["pointer"], a.r_b, a.r_gamma,
+                                   lam_cells(a.img_size, a.r_lam_frac), a.r_profile_mode)
+            rl = r_losses(r, batch["pointed_mask4"], batch["valid4"], 0.0, 0.0, a.w_budget, a.budget_extra,
+                          exec_map=exec_map)
+            losses["r_budget"] = rl["r_budget"]
+            losses["r_prof"] = a.w_r_in * decay * r_profile_loss(r, r_star, batch["valid4"], a.r_loss)
+            with torch.no_grad():
+                logs["R_err"] = (((r.float() - r_star).abs() * batch["valid4"]).sum() / batch["valid4"].sum()).item()
+        else:
+            losses.update(r_losses(r, batch["pointed_mask4"], batch["valid4"],
+                                   a.w_r_in * decay, a.w_r_out * decay, a.w_budget, a.budget_extra, exec_map=exec_map))
     logs.update(r_stats(r.detach(), batch["pointed_mask4"], batch["valid4"]))
     with torch.no_grad():
         logs["g_mean"] = m.backbone.soft_execution(r.detach().float()).mean().item()

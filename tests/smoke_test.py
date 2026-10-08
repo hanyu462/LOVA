@@ -65,6 +65,20 @@ def test_shapes_and_grads():
     rb = sample_r(batch["pointed_mask4"], kind="binary")
     assert set(rb.unique().tolist()) <= {0.0, 1.0}, "binary sampler must produce {0,1}"
 
+    # R* profile: 1 at the deepest point, ~r_b on the boundary, decaying outside, 0 far away
+    from lova.data.rtarget import r_profile
+    rs = r_profile(batch["pointed_mask4"], batch["pointer"], r_b=0.7, gamma=0.7, lam=3.0)
+    m = batch["pointed_mask4"] > 0.5
+    assert rs.shape == batch["pointed_mask4"].shape and rs.min() >= 0 and rs.max() <= 1
+    assert (rs[m].min() >= 0.7 - 1e-4) and (rs[m].max() > 0.99)
+    assert rs[~m].max() <= 0.7 + 1e-4 and rs[~m].min() < 0.05
+    # multi-pointer items share image/targets and differ in pointer
+    ds2 = SyntheticPointerDataset(8, img_size=128, pointer_mode="interior", pointers_per_image=2)
+    item = ds2[0]
+    assert isinstance(item, list) and len(item) == 2 and torch.equal(item[0]["image"], item[1]["image"])
+    b2 = collate([ds2[0], ds2[1]])
+    assert b2["image"].shape[0] == 4
+
 
 def test_phases_and_eval():
     with tempfile.TemporaryDirectory() as d:
@@ -81,6 +95,11 @@ def test_phases_and_eval():
         run("--phase", "A", "--gate-mode", "binary", "--out", f"{d}/Ab")
         run("--phase", "C", "--gate-mode", "binary", "--gate-temp-final", "0.05", "--init", f"{d}/Ab/last.pth",
             "--out", f"{d}/Cb")
+        # R* profile target + interior pointers + 2 pointers per image (phase B and C)
+        run("--phase", "B", "--gate-mode", "binary", "--r-target", "profile", "--pointer-mode", "interior",
+            "--pointers-per-image", "2", "--init", f"{d}/Ab/last.pth", "--out", f"{d}/Bp")
+        run("--phase", "C", "--gate-mode", "binary", "--r-target", "profile", "--pointer-mode", "interior",
+            "--pointers-per-image", "2", "--init", f"{d}/Bp/last.pth", "--out", f"{d}/Cp")
         ev = [sys.executable, os.path.join(ROOT, "eval_pointer.py"), "--ckpt", f"{d}/C/last.pth", "--data",
               "synthetic", "--max-images", "6", "--bs", "4", "--device", "cpu", "--viz", "2"]
         subprocess.run(ev + ["--out", f"{d}/ev"], check=True, cwd=ROOT)

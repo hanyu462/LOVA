@@ -68,6 +68,19 @@ def r_losses(r, pointed_mask4, valid4, w_in=1.0, w_out=0.1, w_budget=1.0, budget
     return {"r_in": w_in * l_in, "r_out": w_out * l_out, "r_budget": w_budget * l_budget}
 
 
+def r_profile_loss(r, r_star, valid4, kind: str = "bce"):
+    """Regress R onto the pseudo-GT profile R* over valid pixels (see data/rtarget.py)."""
+    r = r.float().clamp(1e-4, 1 - 1e-4)
+    t = r_star.float()
+    if kind == "bce":
+        per = -(t * torch.log(r) + (1 - t) * torch.log(1 - r))
+    elif kind == "mse":
+        per = (r - t) ** 2
+    else:
+        raise ValueError(kind)
+    return (per * valid4).sum() / valid4.sum().clamp(min=1)
+
+
 @torch.no_grad()
 def r_stats(r, pointed_mask4, valid4):
     m = pointed_mask4 * valid4

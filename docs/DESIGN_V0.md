@@ -305,6 +305,28 @@ V1 :  G = 1[R > τ] hard, STE
 - Phase C에서 T를 서서히 낮출 수 있다(`--gate-temp-final`). hard routing과의 train/inference 격차를 줄인다.
 - 평가 시 `--gate-mode hard`로 1[R>τ] 실행을 미리 재서 격차를 측정한다.
 
+### R pseudo-GT profile (`--r-target profile`, 2026-10-08 추가)
+
+B/C의 R 지도를 L_R_in(하한) + 약한 L_R_out 대신 pointed mask에서 만든 연속 profile R*로의 회귀로 바꿀 수 있다.
+
+```
+R*(x) = r_b + (1 − r_b)·(D_in(x)/max D_in)^γ     x ∈ M   (내부: 깊을수록 1, 경계 r_b)
+      = r_b · exp(−d_out(x)/λ)                   x ∉ M   (외부: 빠르게 0)
+기본값 r_b = 0.7, γ = 0.7, λ = 0.05·S (512px → 6.4 cell)
+```
+
+- 내부는 mask distance transform(깊이) 기반이라 모양과 무관하게 경계가 정확히 r_b이고 포인터 jitter에 불변.
+  포인터 기준 Euclidean(`--r-profile-mode euclid`)도 가능.
+- 이것은 §1-4의 "mask copy 금지"를 **B에서는 의도적으로 포기**하는 것이다. R*는 (포인터, 해당 mask)로 결정되므로
+  B의 R_θ는 "interactive segmentation + halo" predictor가 된다. image-driven 성분(E7)은 C에서 profile 가중치가
+  감쇠(1 → 0.1)한 뒤 task loss + budget이 만든다.
+- binary 실행에서는 내부 ramp가 실행에 영향이 없고 **halo 폭만** 실행 면적을 정한다:
+  R_out = 0.5인 거리 = λ·ln(r_b/0.5) ≈ 0.34λ (기본값 2.2 cell ≈ 9px). λ가 사실상 compute 손잡이다.
+- 포인터 샘플링 `--pointer-mode interior`(깊이 ≥ 25% max), 이미지당 K 포인터 `--pointers-per-image K`
+  (같은 이미지·다른 인스턴스가 한 배치에 → R_θ(I,p_A) ≠ R_θ(I,p_B)를 직접 학습).
+- Top-K 큰 물체만 쓰지 않는다: E2에서 R 효과가 가장 큰 것이 작은 물체였고, 평가 분포(전 인스턴스)와도 맞춰야 한다.
+- R*는 GPU에서 배치로 즉석 생성(B=32에 20ms)하므로 로더·추론 비용이 없다. `scripts/viz_rtarget.py`로 먼저 본다.
+
 ### 용어
 
 V0에서 soft gating인 한 mask 면적을 줄여도 FLOPs는 줄지 않는다. 따라서 V0의 곡선은

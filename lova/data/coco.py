@@ -24,12 +24,14 @@ from .common import MEAN, STD, finalize
 
 class COCOPointerDataset(Dataset):
     def __init__(self, root: str, split: str = "train2017", img_size: int = 512, train: bool = True,
-                 scale_range=(0.6, 1.25), min_area: float = 32.0, max_pos: int = 256):
+                 scale_range=(0.6, 1.25), min_area: float = 32.0, max_pos: int = 256,
+                 pointer_mode: str = "uniform", pointers_per_image: int = 1):
         from pycocotools.coco import COCO
 
         assert img_size % 32 == 0
         self.root, self.split, self.size, self.train = root, split, img_size, train
         self.scale_range, self.min_area, self.max_pos = scale_range, min_area, max_pos
+        self.pointer_mode, self.pointers_per_image = pointer_mode, pointers_per_image
         self.coco = COCO(os.path.join(root, "annotations", f"instances_{split}.json"))
         self.cat_ids = sorted(self.coco.getCatIds())
         self.cat_to_label = {c: i for i, c in enumerate(self.cat_ids)}
@@ -86,7 +88,8 @@ class COCOPointerDataset(Dataset):
             train = self.train and attempt < 4  # last attempt: deterministic, no crop
             image, valid4, masks4, tf = self._transform(img, masks, train)
             sample = finalize(image, valid4, masks4, classes, self.num_classes, {**meta, **tf},
-                              pointed=pointed, max_pos=self.max_pos)
+                              pointed=pointed, max_pos=self.max_pos, pointer_mode=self.pointer_mode,
+                              pointers_per_image=self.pointers_per_image if pointed is None else 1)
             if sample is not None:
                 return sample
         return None
