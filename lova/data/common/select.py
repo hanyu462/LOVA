@@ -3,12 +3,14 @@
     ratio_i = |mask_i ∧ valid| / |valid|       visible instance area over visible image area
     keep    = { i : ratio_i >= threshold  and  label_i not in exclude_labels }     largest first
 
-exclude_labels: classes that are never pointer targets (still segmentation targets). Meant for
-"surface" objects such as dining table / bed / couch: other objects sit on them, their masks are
-riddled with holes, and a pointer on them makes R_GT cover half the image. Label indices are
-dataset-specific, so the reader converts names (CocoSet.labels_of). COCO working list (val2017,
-600 images): dining table 4.2 % of candidates / owned p10 68 %, bed 1.2 % / 67 %, bench 1.1 % / 68 %,
-couch 1.8 % / 98 %. chair (6.7 %, owned p10 97 %) stays a target.
+exclude_labels: classes that are never pointer targets (still segmentation targets). DEFAULT EMPTY:
+V0 keeps pointer conditioning class-independent and trains on every eligible instance (large
+objects teach wide R). Kept as an ablation / deployment option only. Label indices are
+dataset-specific, so the reader converts names (CocoSet.labels_of). Reference numbers on COCO
+val2017 (600 images) for "surface" classes: dining table 4.2 % of candidates / owned p10 68 %,
+bed 1.2 % / 67 %, bench 1.1 % / 68 %, couch 1.8 % / 98 %; chair 6.7 % / 97 %.
+A class-agnostic alternative, if heavily covered targets ever matter: skip instances whose owned
+fraction (pointer.pointer_region) is below a threshold.
 
     cands = select(transformed, SelectCfg(threshold=0.01))   -> list[int] indices into transformed.masks
 
