@@ -49,7 +49,7 @@ def unit_test():
     assert dg[30, 27] == 0 and torch.isinf(dg[60, 65]), "outside the mask -> inf"
     assert dg[25, 102] > dg[105, 27] > 0, "far arm is farther than the bottom of the own arm"
     assert dg[25, 102] > 150, "geodesic goes around (~75 + 75 + 75 cells), not straight across (75)"
-    cfg = RgtCfg(stride=1, gamma=2.0, lambda_in_frac=1.0)
+    cfg = RgtCfg(mode="geodesic", stride=1, gamma=2.0, lambda_in_frac=1.0)
     r = inside_profile(m, dg, cfg)
     assert r[30, 27] == 1.0 and r[60, 65] == 0.0
     assert r[105, 27] > r[25, 102] > 0 and abs(float(r[dg == dg[m].max()].min()) - math_exp(-1)) < 1e-4
@@ -57,29 +57,29 @@ def unit_test():
     col = r[20:110, 27]
     assert bool((col[11:] <= col[10:-1]).all()), "non-increasing below the pointer (row 30 = index 10) along the arm"
     # gamma 1 decays faster near the pointer than gamma 2
-    r1 = inside_profile(m, dg, RgtCfg(stride=1, gamma=1.0))
+    r1 = inside_profile(m, dg, RgtCfg(mode="geodesic", stride=1, gamma=1.0))
     assert float(r1[40, 27]) < float(r[40, 27])
 
     # different pointers -> different fields; full pipeline helper at stride 2 with snapping
-    ra = make_r_in(m, (27, 30), RgtCfg(stride=2))
-    rb = make_r_in(m, (102, 25), RgtCfg(stride=2))
+    ra = make_r_in(m, (27, 30), RgtCfg(mode="geodesic", stride=2))
+    rb = make_r_in(m, (102, 25), RgtCfg(mode="geodesic", stride=2))
     assert ra.shape == (64, 64) and not torch.allclose(ra, rb)
     ms = downsample_mask(m, 2)
     assert float(ra[ms].min()) > 0 and float(ra[~ms].max()) == 0
     # pointer just outside the downsampled mask snaps to the nearest cell instead of failing
-    r_snap = make_r_in(m, (19, 30), RgtCfg(stride=2))
+    r_snap = make_r_in(m, (19, 30), RgtCfg(mode="geodesic", stride=2))
     assert r_snap.max() == 1.0
 
     # disconnected component (not reachable from the pointer) gets 0
     m2 = m.clone()
     m2[5:10, 60:70] = True
-    r2 = make_r_in(m2, (27, 30), RgtCfg(stride=1))
+    r2 = make_r_in(m2, (27, 30), RgtCfg(mode="geodesic", stride=1))
     assert float(r2[5:10, 60:70].max()) == 0.0
     # ---- outside profile ----
     # disc: R_in = 1 everywhere (pointer-centred small object) -> R_out depends on distance only
     yy, xx = torch.meshgrid(torch.arange(S), torch.arange(S), indexing="ij")
     disc = (yy - 64) ** 2 + (xx - 64) ** 2 < 20 ** 2
-    cfg_o = RgtCfg(stride=1, lambda_out_px=4.0)
+    cfg_o = RgtCfg(mode="geodesic", stride=1, lambda_out_px=4.0)
     r_full = make_rgt(disc, (64, 64), cfg_o)
     assert r_full[64, 64] == 1.0 and r_full.shape == (S, S)
     assert float(r_full[disc].min()) > 0.3                           # inside keeps R_in
@@ -95,9 +95,9 @@ def unit_test():
     assert float(r_full[(euclid < 6 * 4 - 2) & ~disc].min()) > 0.0, "everything inside the cutoff is reached"
     assert float(r_full[0, 0]) == 0.0
     # boundary value is carried outward: the outside near the pointer side is higher than far side
-    rb = make_rgt(m, (27, 30), RgtCfg(stride=1, lambda_out_px=6.0))
+    rb = make_rgt(m, (27, 30), RgtCfg(mode="geodesic", stride=1, lambda_out_px=6.0))
     assert rb[30, 17] > rb[25, 112] > 0, (float(rb[30, 17]), float(rb[25, 112]))
-    assert torch.equal(outside_profile(m, inside_profile(m, dg, cfg), RgtCfg(stride=1))[m], r[m]), "inside untouched"
+    assert torch.equal(outside_profile(m, inside_profile(m, dg, cfg), RgtCfg(mode="geodesic", stride=1))[m], r[m]), "inside untouched"
     # stride-2 end to end (geodesic): shape and range; supervision at stride 4 = 2x2 area average
     r2 = make_rgt(m, (27, 30), RgtCfg(mode="geodesic", stride=2))
     assert r2.shape == (64, 64) and r2.min() >= 0 and r2.max() <= 1
@@ -134,8 +134,9 @@ def unit_test():
     # default cfg is the chosen definition
     d = RgtCfg()
     assert d.mode == "radial_bias" and d.sigma_frac == 1.25 and d.eta == 0.3 and d.band_px == 96.0 and d.gamma == 2.0
-    rd = make_rgt(m, (27, 30))
+    rd = make_rgt(m, (27, 30), RgtCfg(stride=1))            # default mode / parameters, full-res for exact indexing
     assert rd[30, 27] == 1.0 and float(rd[m].min()) > 0.5, "whole target above 0.5 with the default sigma_frac"
+    assert make_rgt(m, (27, 30)).shape == (64, 64), "default stride 2"
     print("make_rgt unit test OK")
 
 
