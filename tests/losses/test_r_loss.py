@@ -41,14 +41,16 @@ def unit_test():
     assert l0 == 0
     l0.backward()
     assert torch.isfinite(pred2.grad).all()
-    # shape mismatch is an error
-    try:
-        r_loss(r_gt[:, :4], r_gt, valid)
-        raise AssertionError("must raise")
-    except ValueError:
-        pass
+    # shape contract: mismatch, a 2-channel prediction, and a 2-D prediction all raise
+    for bad_pred in (r_gt[:, :4], torch.rand(B, 2, H, W), r_gt[0]):
+        try:
+            r_loss(bad_pred, r_gt, valid)
+            raise AssertionError("must raise")
+        except ValueError:
+            pass
     st = r_stats(r_gt + 0.1, r_gt, valid)
-    assert abs(st["r_mae"] - 0.1) < 1e-6 and 0 <= st["r_lit_pred"] <= 1 and 0 <= st["r_lit_gt"] <= 1
+    assert all(torch.is_tensor(v) and v.dim() == 0 for v in st.values()), "stats are 0-d tensors (no host sync)"
+    assert abs(st["r_mae"].item() - 0.1) < 1e-6 and 0 <= st["r_lit_pred"] <= 1 and 0 <= st["r_lit_gt"] <= 1
     print("r_loss unit test OK")
 
 
