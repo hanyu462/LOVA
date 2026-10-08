@@ -98,8 +98,8 @@ def unit_test():
     rb = make_rgt(m, (27, 30), RgtCfg(stride=1, lambda_out_px=6.0))
     assert rb[30, 17] > rb[25, 112] > 0, (float(rb[30, 17]), float(rb[25, 112]))
     assert torch.equal(outside_profile(m, inside_profile(m, dg, cfg), RgtCfg(stride=1))[m], r[m]), "inside untouched"
-    # stride-2 end to end: shape and range; supervision at stride 4 = 2x2 area average
-    r2 = make_rgt(m, (27, 30), RgtCfg(stride=2))
+    # stride-2 end to end (geodesic): shape and range; supervision at stride 4 = 2x2 area average
+    r2 = make_rgt(m, (27, 30), RgtCfg(mode="geodesic", stride=2))
     assert r2.shape == (64, 64) and r2.min() >= 0 and r2.max() <= 1
     r4 = to_supervision(r2, 2)
     assert r4.shape == (32, 32) and abs(float(r4[0, 0]) - float(r2[0:2, 0:2].mean())) < 1e-6
@@ -131,6 +131,11 @@ def unit_test():
     assert float(rC[30, 17]) > 0.3 * float(rB[30, 17]), "inside the band: between B and eta * B"
     st = field_stats(rC, m, (27.0, 30.0))
     assert st["r_pointer"] == 1.0 and 0 < st["r_mask_min"] <= st["r_mask_mean"] <= 1 and 0 <= st["area_gt_half"] <= 1
+    # default cfg is the chosen definition
+    d = RgtCfg()
+    assert d.mode == "radial_bias" and d.sigma_frac == 1.25 and d.eta == 0.3 and d.band_px == 96.0 and d.gamma == 2.0
+    rd = make_rgt(m, (27, 30))
+    assert rd[30, 27] == 1.0 and float(rd[m].min()) > 0.5, "whole target above 0.5 with the default sigma_frac"
     print("make_rgt unit test OK")
 
 
@@ -149,9 +154,13 @@ def main():
     p.add_argument("--target", type=int, default=None, help="instance index to use (default: random candidate)")
     p.add_argument("--pointers", type=int, default=4, help="pointers on the same target (one row each)")
     p.add_argument("--stride", type=int, default=2)
+    p.add_argument("--mode", default="radial_bias", choices=["radial_bias", "radial", "geodesic"])
     p.add_argument("--gamma", type=float, default=2.0)
-    p.add_argument("--lambda-in-frac", type=float, default=1.0)
-    p.add_argument("--lambda-out-px", type=float, default=32.0)
+    p.add_argument("--sigma-frac", type=float, default=1.25)
+    p.add_argument("--eta", type=float, default=0.3)
+    p.add_argument("--band-px", type=float, default=96.0)
+    p.add_argument("--lambda-in-frac", type=float, default=1.0, help="geodesic mode")
+    p.add_argument("--lambda-out-px", type=float, default=32.0, help="geodesic mode")
     p.add_argument("--inside-only", action="store_true", help="step 5-1 view: no outside decay")
     p.add_argument("--compare", action="store_true",
                    help="A/B/C side by side per pointer: geodesic | radial s1.0 | radial s1.25 | radial_bias s1.25, with stats")
@@ -182,10 +191,10 @@ def main():
         idx = a.target
     mask = t.masks[idx]
     region = sampling_region(pointer_region(idx, t.masks), PointerCfg())
-    cfg = RgtCfg(stride=a.stride, gamma=a.gamma, lambda_in_frac=a.lambda_in_frac, lambda_out_px=a.lambda_out_px)
+    cfg = RgtCfg(mode=a.mode, stride=a.stride, gamma=a.gamma, sigma_frac=a.sigma_frac, eta=a.eta, band_px=a.band_px,
+                 lambda_in_frac=a.lambda_in_frac, lambda_out_px=a.lambda_out_px)
     S = a.size
-    print(f"image {img_id}: target {idx} {names[idx]} ({int(mask.sum())} px), stride {a.stride} gamma {a.gamma} "
-          f"lambda_in_frac {a.lambda_in_frac} lambda_out_px {a.lambda_out_px}{' inside only' if a.inside_only else ''}")
+    print(f"image {img_id}: target {idx} {names[idx]} ({int(mask.sum())} px), {cfg}{' inside only' if a.inside_only else ''}")
 
     base = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
     mask_s = downsample_mask(mask, a.stride)
@@ -195,7 +204,7 @@ def main():
     rows = []
     for k in range(a.pointers):
         ptr = sample_from(region, g)
-        r_in = make_r_in(mask, ptr, cfg)                                 # [S/st, S/st]
+        r_in = make_r_in(mask, ptr, cfg) if a.mode == "geodesic" else make_rgt(mask, ptr, RgtCfg(**{**cfg.__dict__, "mode": "radial"}))
         r = r_in if a.inside_only else make_rgt(mask, ptr, cfg)
         r4 = to_supervision(r, max(4 // a.stride, 1))                    # supervision resolution (stride 4)
         up = lambda f: torch.nn.functional.interpolate(f[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
@@ -215,7 +224,8 @@ def main():
             cont[(above & touches_below).numpy()] = col
         img_cont = draw_pointer(Image.fromarray(cont), ptr)
         rows.append(hstack([img_rgb, img_in, img_s2, img_s4, img_cont],
-                           [f"pointer {k}: ({ptr[0]},{ptr[1]})  target {names[idx]}", f"R_in @ stride {a.stride}",
+                           [f"pointer {k}: ({ptr[0]},{ptr[1]})  target {names[idx]}",
+                            f"{'R_in' if a.mode == 'geodesic' else 'B radial (no mask bias)'} @ stride {a.stride}",
                             f"R_GT @ stride {a.stride}", "R_GT @ stride 4 (supervision, nearest)", "contours of R_GT@4: 0.9 0.7 0.5 0.3"]))
         # numbers: profile along the pointer row (stride cells) and boundary range
         px, py = pointer_to_stride(ptr, a.stride)

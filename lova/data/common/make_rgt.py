@@ -2,7 +2,10 @@
 
     R_GT = make_rgt(mask, pointer, cfg)        [S/stride, S/stride] in [0, 1]
 
-Three candidate definitions (RgtCfg.mode), compared side by side in tests/common/test_make_rgt.py:
+Three candidate definitions (RgtCfg.mode), compared side by side in tests/common/test_make_rgt.py.
+Decision (2026-10-08): C "radial_bias" with gamma 2, sigma_frac 1.25, eta 0.3, band_px 96 is the V0
+definition: a pointer-centred computational prior (not an object-shape field) with the target mask
+as a soft bias. A stays as the comparison baseline, B as the ablation without the mask bias.
 
   "geodesic"     A. object-shape field: 5-1 inside profile along the mask (geodesic from the
                     pointer) + 5-2 outside decay carrying the boundary value. R follows the object's
@@ -60,16 +63,18 @@ from .geometry import shift as _shift
 
 @dataclass(frozen=True)
 class RgtCfg:
-    mode: str = "geodesic"      # "geodesic" (A) | "radial" (B) | "radial_bias" (C)
+    mode: str = "radial_bias"   # "radial_bias" (C, chosen 2026-10-08) | "radial" (B) | "geodesic" (A, comparison)
     stride: int = 2             # geometry resolution (canvas / stride)
     gamma: float = 2.0          # exponent: 2 = Gaussian-like plateau around the pointer, 1 = exponential
     # A
     lambda_in_frac: float = 1.0 # lambda_in = frac * max geodesic distance from the pointer (object-relative)
     lambda_out_px: float = 32.0 # outside decay length in INPUT pixels (absolute; 0.05 * 640)
     # B / C
-    sigma_frac: float = 1.0     # sigma = frac * max Euclidean distance from the pointer within the mask
+    sigma_frac: float = 1.25    # sigma = frac * max Euclidean distance from the pointer within the mask
+                                # (1.25 keeps the farthest target cell at R >= 0.5 for gamma 2)
     eta: float = 0.3            # C: background keeps eta of the radial value at equal distance
-    band_px: float = 24.0       # C: width (input px) of the ramp 1 -> 0 OUTSIDE the mask
+    band_px: float = 96.0       # C: width (input px) of the ramp 1 -> 0 OUTSIDE the mask (chosen visually:
+                                # soft transition, ~10 % of the canvas lit for a 1 % object)
     mask_thr: float = 0.5       # downsampled soft mask -> bool
 
 
