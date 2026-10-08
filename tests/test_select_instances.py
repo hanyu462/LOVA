@@ -2,7 +2,8 @@
 
 Unit test (no data needed):
     python tests/test_select_instances.py
-List candidates on real COCO (original-image pre-filter):
+List candidates on real COCO (original-image ratio; --threshold here plays the role of the
+loose pre_threshold, or of the pointer threshold for an eval-style no-crop view):
     python tests/test_select_instances.py --coco-root datasets/coco --threshold 0.02 --n 5
     python tests/test_select_instances.py --coco-root datasets/coco --threshold 0.02 --image-id 139
     python tests/test_select_instances.py --coco-root datasets/coco --threshold 0.02 --stats
@@ -57,6 +58,11 @@ def unit_test():
     assert [x.ann_id for x in prefilter(c, 1, 0.1)] == [10]
     assert prefilter(c, 1, 0.9) == []
     assert abs(annotation_ratios(c, 1, area_from="mask")[0].ratio - 0.5) < 0.01
+    try:
+        annotation_ratios(c, 1, area_from="annotaion")
+        raise AssertionError("typo in area_from must raise")
+    except ValueError:
+        pass
     assert selection_stats(c, 0.01) == dict(threshold=0.01, images=1, images_with_target=1, instances=3, instances_kept=2)
 
     # 1b: recheck on transformed masks with padding. canvas 8x8, real image = left 8x4 (valid), rest padding
@@ -68,6 +74,10 @@ def unit_test():
     valid[:, :, :4] = 1
     r = visible_ratios(masks, valid)
     assert torch.allclose(r, torch.tensor([1.0, 0.125, 0.03125]))
+    leak = masks.clone()
+    leak[1, :, 4:] = 1  # mask values in the padding region must not count
+    assert torch.allclose(visible_ratios(leak, valid), r)
+    assert visible_ratios(masks, valid).device == masks.device
     assert recheck(masks, 0.1, valid) == [0, 1]
     assert recheck(masks, 0.1, None) == [0], "without valid the padding inflates the denominator"
     # a large original instance that got cropped down to a sliver is dropped by the recheck

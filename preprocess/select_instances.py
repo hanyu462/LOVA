@@ -3,13 +3,17 @@
     ratio = visible mask area / visible image area
     keep  = ratio >= threshold   (and not iscrowd)
 
-Two places use the same rule:
-  1a  pre-filter on the original annotation  (`prefilter`, cheap: ann["area"] / (H*W))
-      -> images with no candidate can be skipped before loading pixels
-  1b  recheck AFTER augmentation on the transformed masks (`recheck`, uses the visible area:
-      a random crop can leave only an arm of a person that was large in the original)
+Two places use the same rule, with DIFFERENT thresholds:
+  1a  `prefilter`  on the original annotation (cheap: ann["area"] / (H*W)) with a LOOSE
+      pre_threshold (e.g. 0.002). Optimisation only: skips images that cannot have a target.
+      It must stay loose because a random crop can make a small object large on screen.
+  1b  `recheck`    AFTER augmentation on the transformed masks with the real pointer threshold
+      (e.g. 0.01), over the visible (non-padded) area. This is the correctness criterion:
+      a crop can also leave only an arm of a person that was large in the original.
 
 Only `keep_by_ratio` holds the rule; the other two just build the ratio array.
+Not covered here (add later if needed): retained fraction = area after crop / area before crop,
+which would reject a fragment (e.g. a face) that looks large only because the crop is tight.
 """
 from __future__ import annotations
 
@@ -42,26 +46,33 @@ def annotation_ratios(coco, img_id: int, area_from: str = "annotation") -> list[
     anns = coco.loadAnns(coco.getAnnIds(imgIds=img_id, iscrowd=False))
     out = []
     for a in anns:
-        area = float(a["area"]) if area_from == "annotation" else float(coco.annToMask(a).sum())
+        if area_from == "annotation":
+            area = float(a["area"])
+        elif area_from == "mask":
+            area = float(coco.annToMask(a).sum())
+        else:
+            raise ValueError(f"unknown area_from={area_from!r} (annotation | mask)")
         out.append(Candidate(a["id"], a["category_id"], area, area / ha, tuple(a["bbox"])))
     return out
 
 
-def prefilter(coco, img_id: int, threshold: float, area_from: str = "annotation") -> list[Candidate]:
-    """1a: candidates on the ORIGINAL image, largest first. [] = no pointer target in this image."""
+def prefilter(coco, img_id: int, pre_threshold: float, area_from: str = "annotation") -> list[Candidate]:
+    """1a: candidates on the ORIGINAL image with a LOOSE threshold, largest first.
+    [] = this image cannot have a pointer target even after augmentation. Not the final decision."""
     cands = annotation_ratios(coco, img_id, area_from)
-    return [cands[i] for i in keep_by_ratio([c.ratio for c in cands], threshold)]
+    return [cands[i] for i in keep_by_ratio([c.ratio for c in cands], pre_threshold)]
 
 
 def visible_ratios(masks: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
     """masks [N, h, w] (soft or binary, any stride) -> [N] visible area / visible image area.
-    valid [1, h, w] or [h, w] marks the real image (1) vs padding (0); None = whole canvas."""
-    m = masks.flatten(1).float()
+    valid [1, h, w] or [h, w] marks the real image (1) vs padding (0); None = whole canvas.
+    valid is applied to the numerator too (mask values leaking into padding do not count).
+    Stays on the tensor's device (no host sync) so it can run in the training loop."""
+    m = masks.float()
     if valid is None:
-        denom = float(masks.shape[-1] * masks.shape[-2])
-    else:
-        denom = float(valid.float().sum().clamp(min=1))
-    return m.sum(1) / denom
+        return m.flatten(1).sum(1) / float(m.shape[-2] * m.shape[-1])
+    v = valid.reshape(valid.shape[-2], valid.shape[-1]).to(m.dtype).to(m.device)
+    return (m * v).flatten(1).sum(1) / v.sum().clamp(min=1)
 
 
 def recheck(masks: torch.Tensor, threshold: float, valid: torch.Tensor | None = None) -> list[int]:
@@ -70,7 +81,9 @@ def recheck(masks: torch.Tensor, threshold: float, valid: torch.Tensor | None = 
 
 
 def selection_stats(coco, threshold: float, img_ids=None) -> dict:
-    """How much of the dataset survives the ORIGINAL-image pre-filter (fast, annotation areas)."""
+    """How much of the dataset passes `threshold` on the ORIGINAL image (fast, annotation areas).
+    With the loose pre_threshold this counts skippable images; with the pointer threshold it is
+    the no-crop (eval-style) statistic."""
     img_ids = list(img_ids) if img_ids is not None else coco.getImgIds()
     n_inst = n_keep = n_img_keep = 0
     for i in img_ids:
