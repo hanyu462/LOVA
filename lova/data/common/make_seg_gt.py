@@ -1,6 +1,7 @@
 """Step 6: Segmentation GT for the instance head, from ALL instances of a Transformed sample.
 
-Independent of select / pointer / R_GT: every non-crowd instance is a segmentation target.
+Independent of select / pointer / R_GT: every VISIBLE non-crowd instance after the transform is a
+segmentation target (an instance cropped away entirely gets no GT here).
 
     gt = make_seg_gt(transformed, num_classes, cfg)
 
