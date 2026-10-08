@@ -3,7 +3,8 @@
     idx    = pick_target(cands, generator)                 i ~ Uniform(candidates)
     owned  = pointer_region(idx, masks)                    M_i minus pixels owned by a smaller instance
     safe   = safe_region(owned, cfg)                       {x : D(x) >= alpha * max D},  D = depth to boundary
-    p      = sample_pointer(owned, cfg, generator)         p ~ Uniform(safe)  (fallback: Uniform(owned))
+    region = sampling_region(owned, cfg)                   safe if non-empty else owned   (computed ONCE)
+    p      = sample_from(region, generator)                p ~ Uniform(region)            (cheap, repeatable)
     idx, p = make_pointer(transformed, cands, cfg, generator)   tries candidates until one has a region
 
 Pointer ownership rule (V0, deterministic, used identically at inference):
@@ -127,18 +128,26 @@ def pick_target(cands: list[int], generator: torch.Generator | None = None) -> i
     return cands[int(torch.randint(len(cands), (1,), generator=generator).item())]
 
 
-def sample_pointer(region: torch.Tensor, cfg: PointerCfg = PointerCfg(),
-                   generator: torch.Generator | None = None) -> tuple[int, int] | None:
-    """One pixel (x, y), uniform over the safe interior of `region` (fallback: uniform over `region`).
-    None if the region is empty."""
+def sampling_region(region: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Tensor:
+    """Where pointers may land: the safe interior of `region`, or `region` itself if that is empty
+    (thin objects). Compute once, then sample_from() as often as needed."""
     safe = safe_region(region, cfg)
-    if not safe.any():
-        safe = region
-    idx = torch.nonzero(safe, as_tuple=False)  # [K, 2] (y, x)
+    return safe if safe.any() else region
+
+
+def sample_from(region: torch.Tensor, generator: torch.Generator | None = None) -> tuple[int, int] | None:
+    """One pixel (x, y) uniform over the TRUE cells of region; None if empty."""
+    idx = torch.nonzero(region, as_tuple=False)  # [K, 2] (y, x)
     if len(idx) == 0:
         return None
     y, x = idx[int(torch.randint(len(idx), (1,), generator=generator).item())].tolist()
     return int(x), int(y)
+
+
+def sample_pointer(region: torch.Tensor, cfg: PointerCfg = PointerCfg(),
+                   generator: torch.Generator | None = None) -> tuple[int, int] | None:
+    """sampling_region + sample_from in one call (one pointer per region)."""
+    return sample_from(sampling_region(region, cfg), generator)
 
 
 def make_pointer(t: Transformed, cands: list[int], cfg: PointerCfg = PointerCfg(),

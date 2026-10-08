@@ -21,7 +21,8 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.pointer import (PointerCfg, depth, distance_to, make_pointer, owner_of,  # noqa: E402
-                                      pick_target, pointer_region, safe_region, sample_pointer)
+                                      pick_target, pointer_region, safe_region, sample_from,
+                                      sample_pointer, sampling_region)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
 from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
@@ -64,7 +65,9 @@ def unit_test():
 
     # sampling: always inside, never in the excluded band, spread over the interior
     g = torch.Generator().manual_seed(0)
-    pts = [sample_pointer(circ, cfg, g) for _ in range(500)]
+    region = sampling_region(circ, cfg)
+    assert torch.equal(region, safe)
+    pts = [sample_from(region, g) for _ in range(500)]
     for x, y in pts:
         assert bool(circ[y, x]) and bool(safe[y, x])
     r = torch.tensor([((x - 64) ** 2 + (y - 64) ** 2) ** 0.5 for x, y in pts])
@@ -78,6 +81,7 @@ def unit_test():
     x, y = sample_pointer(bar, PointerCfg(alpha=0.1, depth_stride=4), g)
     assert bool(bar[y, x])
     assert sample_pointer(torch.zeros(S, S, dtype=torch.bool), cfg, g) is None
+    assert sample_from(torch.zeros(S, S, dtype=torch.bool), g) is None
 
     # ownership: big "bed" square containing a small "cat" disc and a tiny "remote"
     bed = torch.zeros(S, S, dtype=torch.bool); bed[8:120, 8:120] = True
@@ -89,8 +93,9 @@ def unit_test():
     assert torch.equal(pointer_region(1, masks), cat) and torch.equal(pointer_region(2, masks), remote)
     assert owner_of((50, 50), masks) == 1 and owner_of((100, 103), masks) == 2 and owner_of((20, 20), masks) == 0
     assert owner_of((0, 0), masks) is None
+    bed_region = sampling_region(own_bed, cfg)
     for _ in range(300):  # bed pointers never land on the cat or the remote
-        x, y = sample_pointer(own_bed, cfg, g)
+        x, y = sample_from(bed_region, g)
         assert bool(bed[y, x]) and not bool(cat[y, x]) and not bool(remote[y, x])
     # fully covered target is skipped by make_pointer, not pointed at via fallback
     cover = torch.stack([cat, cat.clone()])  # instance 1 identical to 0 -> index 0 owns everything, 1 owns nothing
@@ -151,7 +156,8 @@ def main():
         m = t.masks[idx]
         owned = pointer_region(idx, t.masks)
         safe = safe_region(owned, cfg)
-        pts = [q for q in (sample_pointer(owned, cfg, g) for _ in range(a.k)) if q is not None]
+        region = sampling_region(owned, cfg)
+        pts = [q for q in (sample_from(region, g) for _ in range(a.k)) if q is not None]
         dep = depth(F_pool(owned, cfg.depth_stride)) if owned.any() else torch.zeros(1, 1)
         dmax = float(dep.max())
         dpts = [float(dep[y // cfg.depth_stride, x // cfg.depth_stride]) for x, y in pts] or [0.0]
