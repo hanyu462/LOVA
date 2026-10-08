@@ -27,10 +27,12 @@ mask of "the instance centred at q". The GT therefore has three parts and an ign
 
 Centre definition (cfg.center), default "deepest_owned":
     "deepest_owned"  deepest cell of the pixels the instance OWNS (minus every smaller instance that
-                     covers it, the smallest-instance-wins rule of pointer.py): always on the target
-                     mask and off pixels owned by smaller annotated instances (a person on a couch
-                     still overlaps the couch mask; the couch's centre avoids the person, not the
-                     reverse). Unannotated things (COCO has no "plate") stay part of the mask
+                     covers it, the smallest-instance-wins rule of pointer.py): uses the owned region
+                     when it is non-empty, falls back to the full target mask if no owned pixel exists.
+                     So the centre is always on the target mask and, except in that fallback, off
+                     pixels owned by smaller annotated instances (a person on a couch still overlaps
+                     the couch mask; the couch's centre avoids the person, not the reverse).
+                     Unannotated things (COCO has no "plate") stay part of the mask
     "deepest"        deepest cell of the whole mask: always on the mask, may sit on a covering object
     "centroid"       mask centroid (V0): outside the mask for ~6 % of COCO instances (concave shapes)
 Gaussian sigma = max(sigma_min, sqrt(area) / 8 / sigma_div) cells.
@@ -56,8 +58,9 @@ class SegGtCfg:
     sigma_div: float = 6.0      # sigma = object size (cells) / sigma_div
     pos_occupancy: float = 0.25 # a 3x3 neighbour cell counts as inside if >= this fraction of it is mask
     crowd_ignore: bool = True   # crowd / padding cells leave the heatmap and dice losses
-    max_pos: int = 256          # cap on positive cells per sample: one cell per instance is always kept,
-                                # the rest is a random subset (P > 256 in 0.4 % of val2017 samples)
+    max_pos: int = 256          # soft cap on positive cells per sample: at least one cell per represented
+                                # instance is kept (so P can exceed it with > max_pos instances), the rest
+                                # is a random subset (P > 256 in 0.4 % of val2017 samples)
 
 
 @dataclass
@@ -144,7 +147,9 @@ def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
     occ8 = F.avg_pool2d(masks[:, None].float(), s8)[:, 0]                      # [N, h8, w8] occupancy
     ys = torch.arange(h8, dtype=torch.float32).view(-1, 1)
     xs = torch.arange(w8, dtype=torch.float32).view(1, -1)
-    for i in area.argsort(descending=True).tolist():                           # smaller instances assigned last -> win
+    order = sorted(range(n), key=lambda i: (-float(area[i]), -i))              # area desc, index desc: smaller
+    for i in order:                                                            # instances paint last and win,
+        # equal area -> lower index wins (same tie-break as geometry.owner_map / pointer_region)
         if area[i] == 0:                                                       # cropped away: no peak, no positives
             continue
         cx = int(min(max(round((float(centers[i, 0]) + 0.5) / s8 - 0.5), 0), w8 - 1))
@@ -174,7 +179,7 @@ def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
     pos_inst = owner.flatten()[pos_index]
     heat_valid.view(-1)[pos_index] = True                                      # positives are never ignored
     if pos_index.numel() > cfg.max_pos:
-        # keep one cell per instance (its centre cell if it owns it, else any), then a random subset of the rest
+        # keep at least one positive per represented instance, then a random subset of the rest (soft cap)
         first = torch.zeros(pos_index.numel(), dtype=torch.bool)
         seen = set()
         for k, inst in enumerate(pos_inst.tolist()):

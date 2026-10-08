@@ -99,6 +99,12 @@ def unit_test():
     g_c = make_seg_gt(t_c, 3, SegGtCfg(center="centroid"))
     assert 0 in g_c.pos_inst.tolist(), "big instance reclaims an unowned occupied cell"
     assert set(g_c.pos_inst.tolist()) == set(range(len(masks_c)))
+    # equal-area collision: lower index wins the shared cells (same tie-break as owner_map)
+    a_ = torch.zeros(64, 64, dtype=torch.bool); a_[8:24, 8:24] = True
+    t_eq = Transformed(torch.zeros(3, 64, 64), torch.stack([a_, a_.clone()]), torch.zeros(64, 64, dtype=torch.bool),
+                       torch.ones(64, 64, dtype=torch.bool), torch.tensor([0, 1]), [1, 2], 0, TransformParams(1, 64, 64, False, 0, 0), (64, 64))
+    g_eq = make_seg_gt(t_eq, 3, SegGtCfg(center="centroid"))
+    assert set(g_eq.pos_inst.tolist()) == {0}, "identical masks: lower index owns every cell; nothing is stolen for the other"
     # an instance with no visible pixel (cropped away): no peak, no positives, centre (-1, -1)
     t_inv = fake_transformed()
     t_inv.masks[1] = False
