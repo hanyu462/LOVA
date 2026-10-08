@@ -113,10 +113,19 @@ def unit_test():
     assert torch.equal(pointer_region(1, masks), cat) and torch.equal(pointer_region(2, masks), remote)
     assert owner_of((50, 50), masks) == 1 and owner_of((100, 103), masks) == 2 and owner_of((20, 20), masks) == 0
     assert owner_of((0, 0), masks) is None
+    assert owner_of((-1, 5), masks) is None and owner_of((5, S), masks) is None   # out of canvas, no wrap-around
     bed_region = sampling_region(own_bed, cfg)
-    for _ in range(300):  # bed pointers never land on the cat or the remote
+    safe_bed = safe_region(own_bed, cfg)
+    for _ in range(300):  # pointer in the target mask, in its owned region, in safe (non-empty), never on cat/remote
         x, y = sample_from(bed_region, g)
-        assert bool(bed[y, x]) and not bool(cat[y, x]) and not bool(remote[y, x])
+        assert bool(bed[y, x]) and bool(own_bed[y, x]) and bool(safe_bed[y, x])
+        assert not bool(cat[y, x]) and not bool(remote[y, x])
+    # same seed -> same pointer; different seeds -> spread
+    a1 = make_pointer(type("T", (), {"masks": masks}), [0, 1], cfg, torch.Generator().manual_seed(3))
+    a2 = make_pointer(type("T", (), {"masks": masks}), [0, 1], cfg, torch.Generator().manual_seed(3))
+    assert a1 == a2
+    spread = {make_pointer(type("T", (), {"masks": masks}), [0, 1], cfg, torch.Generator().manual_seed(k))[1] for k in range(20)}
+    assert len(spread) > 10
     # fully covered target is skipped by make_pointer, not pointed at via fallback
     cover = torch.stack([cat, cat.clone()])  # instance 1 identical to 0 -> index 0 owns everything, 1 owns nothing
     class T2:

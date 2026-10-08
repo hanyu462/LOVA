@@ -8,7 +8,7 @@
              candidates in random order; the first one with a non-empty owned region is the target
              (pick_target alone is the plain "one uniform candidate" helper)
 
-Pointer ownership rule (V0, deterministic, used identically at inference):
+Pointer ownership rule (V0 training / evaluation convention, deterministic):
     owner(x) = argmin_{i : x in M_i} |M_i|      the SMALLEST instance containing the pixel
 A click on a cat lying on a bed means the cat, so bed pointers are never placed on the cat.
 Ownership is resolved against ALL instances (not only candidates): a remote too small to be a
@@ -17,7 +17,8 @@ real depth order; it only fixes what an ambiguous click means. owner_of() applie
 with GT masks for evaluation / visualisation; the deployed model has no masks and must have
 learned the rule from (I, p) -> R.
 
-Policy (deliberately simple): uniform over eligible instances, uniform over the safe interior.
+Policy (deliberately simple): uniform over pointer-feasible eligible instances (those with a
+non-empty owned region), uniform over the safe interior.
 No centroid, no bbox centre: the user may click anywhere inside an object, so training pointers
 should cover the interior, just not the boundary band where a 1-2 px annotation error would put
 the pointer outside the mask and where the later R field would be very one-sided.
@@ -64,7 +65,7 @@ def distance_to(target: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
     """target [h, w] bool -> [h, w] float: chamfer distance (cells) from every cell to the nearest
     TRUE cell (0 on TRUE cells, +inf if target is empty). Converges in <= max distance iterations."""
     inf = float("inf")
-    d = torch.where(target, torch.zeros(target.shape), torch.full(target.shape, inf))
+    d = torch.where(target, torch.zeros_like(target, dtype=torch.float32), torch.full_like(target, inf, dtype=torch.float32))
     for _ in range(max_iter):
         best = d
         for dy, dx, wgt in _SHIFTS:
@@ -84,7 +85,7 @@ def depth(mask: torch.Tensor) -> torch.Tensor:
 
 
 def erode(mask: torch.Tensor, px: int) -> torch.Tensor:
-    """mask [S, S] bool -> cells farther than `px` (4-neighbour) from any non-mask cell."""
+    """mask [S, S] bool -> cells farther than `px` (8-neighbour / Chebyshev) from any non-mask cell."""
     m = mask
     for _ in range(px):
         inv = (~m)[None, None].float()
@@ -132,8 +133,12 @@ def pointer_region(idx: int, masks: torch.Tensor) -> torch.Tensor:
 
 
 def owner_of(xy, masks: torch.Tensor) -> int | None:
-    """Inference-side counterpart: the smallest instance containing pixel (x, y), or None."""
+    """GT-side counterpart for evaluation / visualisation: the smallest instance containing pixel
+    (x, y), or None (outside every mask or outside the canvas)."""
     x, y = int(xy[0]), int(xy[1])
+    h, w = masks.shape[-2:]
+    if not (0 <= x < w and 0 <= y < h):
+        return None
     inside = torch.nonzero(masks[:, y, x])[:, 0]
     if len(inside) == 0:
         return None
