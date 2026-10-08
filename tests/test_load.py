@@ -1,9 +1,9 @@
 """lova.data.coco.load: unit test on an in-memory COCO + visual check on real COCO.
 
     python tests/test_load.py                                   # unit test only (no data)
-    python tests/test_load.py --coco-root datasets/coco --n 4   # + opens a window per image
-    python tests/test_load.py --coco-root datasets/coco --image-id 139
-    python tests/test_load.py --coco-root datasets/coco --n 4 --out viz/load   # save PNGs instead (headless server)
+    python tests/test_load.py --root datasets/coco --n 4   # + opens a window per image
+    python tests/test_load.py --root datasets/coco --image-id 139
+    python tests/test_load.py --root datasets/coco --n 4 --out viz/load   # save PNGs instead (headless server)
 
 PNG = original image with every instance mask filled + outlined, label "class ratio";
 crowd (ignore) regions, if any, are hatched in grey.
@@ -96,7 +96,7 @@ def check_real(cs: CocoSet, img_id: int):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--coco-root", default=None)
+    p.add_argument("--root", default=None)
     p.add_argument("--split", default="val2017")
     p.add_argument("--n", type=int, default=4)
     p.add_argument("--image-id", type=int, default=None)
@@ -105,9 +105,9 @@ def main():
     a = p.parse_args()
 
     unit_test()
-    if a.coco_root is None:
+    if a.root is None:
         return
-    cs = open_coco(a.coco_root, a.split)
+    cs = open_coco(a.root, a.split)
     ids = [a.image_id] if a.image_id is not None else \
         [int(i) for i in np.random.RandomState(a.seed).choice(cs.image_ids(), a.n, replace=False)]
     if a.out:
