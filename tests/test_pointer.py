@@ -4,8 +4,8 @@
     python tests/test_pointer.py --root datasets/coco --image-id 2153 --seed 0 --k 30
     python tests/test_pointer.py --root datasets/coco --image-id 39769 --seed 5 --k 30 --alpha 0.2
 
-Window: transformed image; the chosen instance's mask filled, its excluded boundary band darkened,
-the safe interior bright, and k sampled pointers (yellow). Repeated with different generators so
+Window: transformed image; the chosen instance's mask filled, pixels owned by a smaller instance
+very dark, the excluded boundary band dark, the safe interior bright, k sampled pointers (yellow). Repeated with different generators so
 the spread can be judged: pointers should cover the interior, never sit on the boundary, and not
 cluster at the centre. Terminal: depth statistics of the sampled points.
 """
@@ -20,8 +20,8 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lova.data.common.pointer import (PointerCfg, depth, distance_to, make_pointer, pick_target,  # noqa: E402
-                                      safe_region, sample_pointer)
+from lova.data.common.pointer import (PointerCfg, depth, distance_to, make_pointer, owner_of,  # noqa: E402
+                                      pick_target, pointer_region, safe_region, sample_pointer)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
 from tests.viz import draw_pointer, hstack, overlay_masks  # noqa: E402
@@ -71,11 +71,33 @@ def unit_test():
     assert 0.25 < inner < 0.55, inner                  # uniform over area, not clustered at the centre
     assert r.max() <= 33
 
-    # thin bar: safe region may be empty at stride 4 -> fallback to the mask itself
+    # thin bar: safe region may be empty at stride 4 -> fallback to the region itself
     bar = torch.zeros(S, S, dtype=torch.bool)
     bar[60:63, 10:118] = True
     x, y = sample_pointer(bar, PointerCfg(alpha=0.1, depth_stride=4), g)
     assert bool(bar[y, x])
+    assert sample_pointer(torch.zeros(S, S, dtype=torch.bool), cfg, g) is None
+
+    # ownership: big "bed" square containing a small "cat" disc and a tiny "remote"
+    bed = torch.zeros(S, S, dtype=torch.bool); bed[8:120, 8:120] = True
+    cat = (yy - 50) ** 2 + (xx - 50) ** 2 < 20 ** 2
+    remote = torch.zeros(S, S, dtype=torch.bool); remote[100:106, 90:110] = True
+    masks = torch.stack([bed, cat, remote])
+    own_bed = pointer_region(0, masks)
+    assert not bool((own_bed & cat).any()) and not bool((own_bed & remote).any())
+    assert torch.equal(pointer_region(1, masks), cat) and torch.equal(pointer_region(2, masks), remote)
+    assert owner_of((50, 50), masks) == 1 and owner_of((100, 103), masks) == 2 and owner_of((20, 20), masks) == 0
+    assert owner_of((0, 0), masks) is None
+    for _ in range(300):  # bed pointers never land on the cat or the remote
+        x, y = sample_pointer(own_bed, cfg, g)
+        assert bool(bed[y, x]) and not bool(cat[y, x]) and not bool(remote[y, x])
+    # fully covered target is skipped by make_pointer, not pointed at via fallback
+    cover = torch.stack([cat, cat.clone()])  # instance 1 identical to 0 -> index 0 owns everything, 1 owns nothing
+    class T2:
+        masks = cover
+    for _ in range(20):
+        idx, (x, y) = make_pointer(T2, [0, 1], cfg, g)
+        assert idx == 0
 
     # pick_target is uniform over candidates
     g = torch.Generator().manual_seed(1)
@@ -87,6 +109,7 @@ def unit_test():
         masks = torch.stack([circ, bar])
     idx, p = make_pointer(T, [0, 1], cfg, g)
     assert idx in (0, 1) and bool(T.masks[idx][p[1], p[0]])
+    assert make_pointer(T, [], cfg, g) is None
     print("pointer unit test OK")
 
 
@@ -128,22 +151,23 @@ def main():
     panels, titles = [], []
     for idx in targets:
         m = t.masks[idx]
-        safe = safe_region(m, cfg)
-        pts = [sample_pointer(m, cfg, g) for _ in range(a.k)]
-        dep = depth(F_pool(m, cfg.depth_stride))
+        owned = pointer_region(idx, t.masks)
+        safe = safe_region(owned, cfg)
+        pts = [q for q in (sample_pointer(owned, cfg, g) for _ in range(a.k)) if q is not None]
+        dep = depth(F_pool(owned, cfg.depth_stride)) if owned.any() else torch.zeros(1, 1)
         dmax = float(dep.max())
-        dpts = [float(dep[y // cfg.depth_stride, x // cfg.depth_stride]) for x, y in pts]
+        dpts = [float(dep[y // cfg.depth_stride, x // cfg.depth_stride]) for x, y in pts] or [0.0]
         img = overlay_masks(base, m[None], labels=[names[idx]], alpha=0.35)
         arr = np.asarray(img).astype(np.float32)
-        band = (m & ~safe).numpy()
-        arr[band] *= 0.45                                      # excluded boundary band: dark
-        arr[safe.numpy()] = arr[safe.numpy()] * 0.6 + 255 * 0.4  # safe interior: bright
+        arr[(m & ~owned).numpy()] *= 0.25                          # owned by a smaller instance: very dark
+        arr[(owned & ~safe).numpy()] *= 0.45                       # excluded boundary band: dark
+        arr[safe.numpy()] = arr[safe.numpy()] * 0.6 + 255 * 0.4    # safe interior: bright
         img = Image.fromarray(arr.clip(0, 255).astype(np.uint8))
         for q in pts:
             draw_pointer(img, q, radius=4)
         panels.append(img)
-        titles.append(f"{names[idx]}  safe {float(safe.sum()) / float(m.sum()):.0%} of mask  alpha {a.alpha}  k={a.k}")
-        print(f"  {names[idx]:<14} mask {int(m.sum()):>7} px  safe {float(safe.sum()) / float(m.sum()):.0%}  "
+        titles.append(f"{names[idx]}  owned {float(owned.sum()) / float(m.sum()):.0%}  safe {float(safe.sum()) / float(m.sum()):.0%} of mask  alpha {a.alpha}  k={len(pts)}")
+        print(f"  {names[idx]:<14} mask {int(m.sum()):>7} px  owned {float(owned.sum()) / float(m.sum()):.0%}  safe {float(safe.sum()) / float(m.sum()):.0%}  "
               f"max depth {dmax * cfg.depth_stride:.0f} px  sampled depth min/mean {min(dpts) * cfg.depth_stride:.0f}/"
               f"{np.mean(dpts) * cfg.depth_stride:.0f} px")
     panel = hstack(panels, titles)

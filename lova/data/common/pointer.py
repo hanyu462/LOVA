@@ -1,9 +1,17 @@
 """Step 4: pick ONE pointer target among the candidates and ONE point inside it.
 
-    idx   = pick_target(cands, generator)                 i ~ Uniform(candidates)
-    safe  = safe_region(mask, cfg)                        {x in M : D(x) >= alpha * max D},  D = depth to boundary
-    p     = sample_pointer(mask, cfg, generator)          p ~ Uniform(safe)   (falls back to M if safe is empty)
-    idx, p = make_pointer(transformed, cands, cfg, generator)
+    idx    = pick_target(cands, generator)                 i ~ Uniform(candidates)
+    owned  = pointer_region(idx, masks)                    M_i minus pixels owned by a smaller instance
+    safe   = safe_region(owned, cfg)                       {x : D(x) >= alpha * max D},  D = depth to boundary
+    p      = sample_pointer(owned, cfg, generator)         p ~ Uniform(safe)  (fallback: Uniform(owned))
+    idx, p = make_pointer(transformed, cands, cfg, generator)   tries candidates until one has a region
+
+Pointer ownership rule (V0, deterministic, used identically at inference):
+    owner(x) = argmin_{i : x in M_i} |M_i|      the SMALLEST instance containing the pixel
+A click on a cat lying on a bed means the cat, so bed pointers are never placed on the cat.
+Ownership is resolved against ALL instances (not only candidates): a remote too small to be a
+target still owns its pixels, so a click there is never read as "bed". This says nothing about
+real depth order; it only fixes what an ambiguous click means.
 
 Policy (deliberately simple): uniform over eligible instances, uniform over the safe interior.
 No centroid, no bbox centre: the user may click anywhere inside an object, so training pointers
@@ -89,6 +97,29 @@ def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Ten
     return safe & mask
 
 
+def pointer_region(idx: int, masks: torch.Tensor) -> torch.Tensor:
+    """masks [N, S, S] bool -> [S, S] bool: pixels of instance idx that it OWNS (not covered by any
+    smaller instance; ties broken by lower index)."""
+    areas = masks.flatten(1).sum(1)
+    own = masks[idx].clone()
+    for j in range(masks.shape[0]):
+        if j == idx:
+            continue
+        if areas[j] < areas[idx] or (areas[j] == areas[idx] and j < idx):
+            own &= ~masks[j]
+    return own
+
+
+def owner_of(xy, masks: torch.Tensor) -> int | None:
+    """Inference-side counterpart: the smallest instance containing pixel (x, y), or None."""
+    x, y = int(xy[0]), int(xy[1])
+    inside = torch.nonzero(masks[:, y, x])[:, 0]
+    if len(inside) == 0:
+        return None
+    areas = masks[inside].flatten(1).sum(1)
+    return int(inside[areas.argmin()])
+
+
 def pick_target(cands: list[int], generator: torch.Generator | None = None) -> int:
     """One candidate index, uniformly at random."""
     if not cands:
@@ -96,21 +127,28 @@ def pick_target(cands: list[int], generator: torch.Generator | None = None) -> i
     return cands[int(torch.randint(len(cands), (1,), generator=generator).item())]
 
 
-def sample_pointer(mask: torch.Tensor, cfg: PointerCfg = PointerCfg(),
-                   generator: torch.Generator | None = None) -> tuple[int, int]:
-    """One pixel (x, y), uniform over the safe interior (fallback: uniform over the mask)."""
-    region = safe_region(mask, cfg)
-    if not region.any():
-        region = mask
-    idx = torch.nonzero(region, as_tuple=False)  # [K, 2] (y, x)
+def sample_pointer(region: torch.Tensor, cfg: PointerCfg = PointerCfg(),
+                   generator: torch.Generator | None = None) -> tuple[int, int] | None:
+    """One pixel (x, y), uniform over the safe interior of `region` (fallback: uniform over `region`).
+    None if the region is empty."""
+    safe = safe_region(region, cfg)
+    if not safe.any():
+        safe = region
+    idx = torch.nonzero(safe, as_tuple=False)  # [K, 2] (y, x)
     if len(idx) == 0:
-        raise ValueError("empty mask")
+        return None
     y, x = idx[int(torch.randint(len(idx), (1,), generator=generator).item())].tolist()
     return int(x), int(y)
 
 
 def make_pointer(t: Transformed, cands: list[int], cfg: PointerCfg = PointerCfg(),
-                 generator: torch.Generator | None = None) -> tuple[int, tuple[int, int]]:
-    """(pointed instance index, (x, y)) for one transformed sample."""
-    idx = pick_target(cands, generator)
-    return idx, sample_pointer(t.masks[idx], cfg, generator)
+                 generator: torch.Generator | None = None) -> tuple[int, tuple[int, int]] | None:
+    """(pointed instance index, (x, y)) for one transformed sample. Candidates are tried in random
+    order; one whose owned region is empty (fully covered by smaller instances) is skipped.
+    None if no candidate has an owned pixel."""
+    order = [cands[i] for i in torch.randperm(len(cands), generator=generator).tolist()]
+    for idx in order:
+        p = sample_pointer(pointer_region(idx, t.masks), cfg, generator)
+        if p is not None:
+            return idx, p
+    return None
