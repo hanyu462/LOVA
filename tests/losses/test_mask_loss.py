@@ -71,17 +71,28 @@ def unit_test():
     assert float(mask_loss(km_fit, mf_fit, [torch.tensor([10])], [torch.tensor([0])], [masks[1]], mask_valid[:1])) < 1e-3
     # bf16 inputs are computed in float32
     assert torch.isfinite(mask_loss(kernel_map.detach().to(torch.bfloat16), mask_feat.detach().to(torch.bfloat16), pos_index, pos_inst, masks, mask_valid))
-    # shape / index contract
+    # shape / index contract: D mismatch, missing image, out-of-range cell, NEGATIVE cell, length mismatch, bad instance
     for args in ((kernel_map, mask_feat[:, :2], pos_index, pos_inst, masks, mask_valid),
                  (kernel_map, mask_feat, pos_index[:1], pos_inst, masks, mask_valid),
-                 (kernel_map, mask_feat, [torch.tensor([99]), pos_index[1]], pos_inst, masks, mask_valid)):
+                 (kernel_map, mask_feat, [torch.tensor([99]), pos_index[1]], pos_inst, masks, mask_valid),
+                 (kernel_map, mask_feat, [torch.tensor([-1]), pos_index[1]], [torch.tensor([0]), pos_inst[1]], masks, mask_valid),
+                 (kernel_map, mask_feat, [torch.tensor([0, 1]), pos_index[1]], [torch.tensor([0]), pos_inst[1]], masks, mask_valid),
+                 (kernel_map, mask_feat, pos_index, [torch.tensor([0, 0, 5]), pos_inst[1]], masks, mask_valid)):
         try:
             mask_loss(*args)
             raise AssertionError("must raise")
         except ValueError:
             pass
-    st = mask_stats(kernel_map.detach(), mask_feat.detach(), pos_index, pos_inst, masks, mask_valid)
-    assert st["n_pos_cells"] == 4 and torch.is_tensor(st["dice"])
+    st = mask_stats(kernel_map.detach(), mask_feat.detach(), pos_index, pos_inst, masks, mask_valid, loss=l.detach())
+    assert st["n_pos_cells"] == 4 and abs(float(st["dice"]) - (1 - float(l.detach()))) < 1e-6
+    st0 = mask_stats(kernel_map.detach(), mask_feat.detach(), [torch.zeros(0, dtype=torch.long)] * B, [torch.zeros(0, dtype=torch.long)] * B, masks, mask_valid)
+    assert st0["n_pos_cells"] == 0 and torch.isnan(st0["dice"]), "no positives -> dice undefined (NaN), not 1"
+    # soft_dice_loss contract
+    try:
+        soft_dice_loss(torch.zeros(1, H4, W4), torch.zeros(1, H4, W4 - 1), valid)
+        raise AssertionError("must raise")
+    except ValueError:
+        pass
     print("mask_loss unit test OK")
 
 

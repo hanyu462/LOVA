@@ -40,9 +40,11 @@ def dynamic_masks(kernel_map_b: torch.Tensor, mask_feat_b: torch.Tensor, pos_ind
 def soft_dice_loss(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
     """logits / target [P, H, W], valid [H, W] bool -> [P] (1 - dice). Ignored pixels contribute to
     neither numerator nor denominator."""
+    if logits.dim() != 3 or logits.shape != target.shape or valid.shape != logits.shape[1:]:
+        raise ValueError(f"logits {tuple(logits.shape)} / target {tuple(target.shape)} must be [P,H,W] and valid [H,W], got {tuple(valid.shape)}")
     p = torch.sigmoid(logits.float())
-    t = target.float()
-    v = valid.to(p.dtype)[None]
+    t = target.to(device=p.device, dtype=p.dtype)
+    v = valid.to(device=p.device, dtype=p.dtype)[None]
     inter = (v * p * t).flatten(1).sum(1)
     denom = (v * p * p).flatten(1).sum(1) + (v * t * t).flatten(1).sum(1)
     return 1.0 - (2.0 * inter + eps) / (denom + eps)
@@ -55,15 +57,21 @@ def mask_loss(kernel_map: torch.Tensor, mask_feat: torch.Tensor, pos_index: list
         raise ValueError(f"kernel_map {tuple(kernel_map.shape)} and mask_feat {tuple(mask_feat.shape)} must be [B,D,*,*] with the same B, D")
     if not (len(pos_index) == len(pos_inst) == len(masks_s4) == B) or mask_valid.shape != (B, *mask_feat.shape[2:]):
         raise ValueError("pos_index / pos_inst / masks_s4 must have one entry per image; mask_valid must be [B,H4,W4]")
+    n_cells = kernel_map.shape[2] * kernel_map.shape[3]
     losses = []
     for b in range(B):
-        idx = pos_index[b].to(kernel_map.device)
+        idx, inst = pos_index[b].to(kernel_map.device), pos_inst[b].to(kernel_map.device)
+        if idx.numel() != inst.numel():
+            raise ValueError(f"image {b}: pos_index has {idx.numel()} entries but pos_inst {inst.numel()}")
         if idx.numel() == 0:
             continue
-        if int(idx.max()) >= kernel_map.shape[2] * kernel_map.shape[3]:
-            raise ValueError(f"pos_index out of range for a {tuple(kernel_map.shape[2:])} kernel grid")
+        # a negative index would silently pick the last cell / instance: refuse
+        if int(idx.min()) < 0 or int(idx.max()) >= n_cells:
+            raise ValueError(f"image {b}: pos_index out of range for a {tuple(kernel_map.shape[2:])} kernel grid")
+        if int(inst.min()) < 0 or int(inst.max()) >= masks_s4[b].shape[0]:
+            raise ValueError(f"image {b}: pos_inst out of range for {masks_s4[b].shape[0]} instances")
         logits = dynamic_masks(kernel_map[b].float(), mask_feat[b].float(), idx)
-        target = masks_s4[b].to(mask_feat.device)[pos_inst[b].to(mask_feat.device)]
+        target = masks_s4[b].to(mask_feat.device)[inst]
         losses.append(soft_dice_loss(logits, target, mask_valid[b], cfg.eps))
     if not losses:
         return kernel_map.float().sum() * 0.0 + mask_feat.float().sum() * 0.0
@@ -72,8 +80,14 @@ def mask_loss(kernel_map: torch.Tensor, mask_feat: torch.Tensor, pos_index: list
 
 @torch.no_grad()
 def mask_stats(kernel_map: torch.Tensor, mask_feat: torch.Tensor, pos_index: list, pos_inst: list,
-               masks_s4: list, mask_valid: torch.Tensor) -> dict:
-    """0-d tensors: number of positives and mean soft dice (1 - loss) over them."""
+               masks_s4: list, mask_valid: torch.Tensor, loss: torch.Tensor | None = None) -> dict:
+    """0-d tensors: number of positive cells and their mean soft dice (1 - loss). Pass the loss you
+    already computed to avoid redoing the dynamic masks; without positives the dice is NaN (undefined),
+    not 1. Call at logging time only."""
     n = sum(int(p.numel()) for p in pos_index)
-    l = mask_loss(kernel_map, mask_feat, pos_index, pos_inst, masks_s4, mask_valid)
-    return dict(n_pos_cells=torch.tensor(float(n)), dice=1.0 - l)
+    dev = kernel_map.device
+    if n == 0:
+        return dict(n_pos_cells=torch.zeros((), device=dev), dice=torch.full((), float("nan"), device=dev))
+    if loss is None:
+        loss = mask_loss(kernel_map, mask_feat, pos_index, pos_inst, masks_s4, mask_valid)
+    return dict(n_pos_cells=torch.tensor(float(n), device=dev), dice=1.0 - loss.detach())
