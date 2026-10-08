@@ -83,6 +83,14 @@ def unit_test():
     assert bool(make_seg_gt(t, 3, SegGtCfg(crowd_ignore=False)).heat_valid[3:6, 11].all())
     # soft masks at stride 4: area preserved
     assert abs(float(gt.masks_s4[0].sum()) * 16 - float(t.masks[0].sum())) < 1
+    # an instance with no visible pixel (cropped away): no peak, no positives, centre (-1, -1)
+    t_inv = fake_transformed()
+    t_inv.masks[1] = False
+    g_inv = make_seg_gt(t_inv, 3)
+    assert 1 not in g_inv.pos_inst.tolist() and g_inv.heat[1].max() == 0 and tuple(g_inv.centers[1].tolist()) == (-1.0, -1.0)
+    assert not bool(g_inv.center_pixel_inside[1]) and bool(g_inv.center_pixel_inside[0])
+    g_inv_c = make_seg_gt(t_inv, 3, SegGtCfg(center="centroid"))
+    assert 1 not in g_inv_c.pos_inst.tolist() and tuple(g_inv_c.centers[1].tolist()) == (-1.0, -1.0)
     # empty sample
     t0 = Transformed(torch.zeros(3, 64, 64), torch.zeros(0, 64, 64, dtype=torch.bool), torch.zeros(64, 64, dtype=torch.bool),
                      torch.ones(64, 64, dtype=torch.bool), torch.zeros(0, dtype=torch.long), [], 0, TransformParams(1, 64, 64, False, 0, 0), (64, 64))

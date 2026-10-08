@@ -19,14 +19,18 @@ mask of "the instance centred at q". The GT therefore has three parts and an ign
                                -> which kernels are trained, and against which instance
     masks_s4    [N, S/4, S/4]  soft (area-averaged) instance masks at the mask-feature stride
     mask_valid  [S/4, S/4]     dice ignore: False on crowd and padding
-    centers     [N, 2]         (x, y) full-res pixels, for visualisation / analysis
+    centers     [N, 2]         (x, y) full-res pixels, for visualisation / analysis; (-1, -1) for an
+                               instance with no visible pixel (cropped away by the transform): such an
+                               instance gets no heat peak and no positive cell, it is not a target here
     center_pixel_inside [N]    whether the centre PIXEL lies on the instance mask (concave shapes may
-                               not for "centroid"); the stride-8 centre cell is always a positive anyway
+                               not for "centroid"); False for invisible instances
 
 Centre definition (cfg.center), default "deepest_owned":
     "deepest_owned"  deepest cell of the pixels the instance OWNS (minus every smaller instance that
-                     covers it, the pointer ownership rule): always on the mask, never on another
-                     annotated object. Unannotated things (COCO has no "plate") stay part of the mask
+                     covers it, the smallest-instance-wins rule of pointer.py): always on the target
+                     mask and off pixels owned by smaller annotated instances (a person on a couch
+                     still overlaps the couch mask; the couch's centre avoids the person, not the
+                     reverse). Unannotated things (COCO has no "plate") stay part of the mask
     "deepest"        deepest cell of the whole mask: always on the mask, may sit on a covering object
     "centroid"       mask centroid (V0): outside the mask for ~6 % of COCO instances (concave shapes)
 Gaussian sigma = max(sigma_min, sqrt(area) / 8 / sigma_div) cells.
@@ -70,22 +74,26 @@ class SegGT:
 
 
 def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Tensor:
-    """[N, S, S] bool -> [N, 2] (x, y) full-res pixels. "deepest*" work on the mask at `stride`."""
+    """[N, S, S] bool -> [N, 2] (x, y) full-res pixels; (-1, -1) for an empty mask.
+    "deepest*" work on the mask at `stride`."""
     n, h, w = masks.shape
-    out = torch.zeros(n, 2)
+    out = torch.full((n, 2), -1.0)
     if n == 0:
         return out
+    visible = masks.flatten(1).any(1)
     if how == "centroid":
         ys = torch.arange(h, dtype=torch.float32).view(1, -1, 1)
         xs = torch.arange(w, dtype=torch.float32).view(1, 1, -1)
         m = masks.float()
         area = m.sum((1, 2)).clamp(min=1e-6)
-        out[:, 0] = (m * xs).sum((1, 2)) / area
-        out[:, 1] = (m * ys).sum((1, 2)) / area
+        out[visible, 0] = ((m * xs).sum((1, 2)) / area)[visible]
+        out[visible, 1] = ((m * ys).sum((1, 2)) / area)[visible]
         return out
     if how in ("deepest", "deepest_owned"):
         st, half = stride, (stride - 1) / 2
         for i in range(n):
+            if not visible[i]:
+                continue
             region = pointer_region(i, masks) if how == "deepest_owned" else masks[i]
             if not region.any():                                                # fully covered by smaller instances
                 region = masks[i]
@@ -133,6 +141,8 @@ def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
     ys = torch.arange(h8, dtype=torch.float32).view(-1, 1)
     xs = torch.arange(w8, dtype=torch.float32).view(1, -1)
     for i in area.argsort(descending=True).tolist():                           # smaller instances assigned last -> win
+        if area[i] == 0:                                                       # cropped away: no peak, no positives
+            continue
         cx = int(min(max(round((float(centers[i, 0]) + 0.5) / s8 - 0.5), 0), w8 - 1))
         cy = int(min(max(round((float(centers[i, 1]) + 0.5) / s8 - 0.5), 0), h8 - 1))
         center_pixel_inside[i] = bool(masks[i, min(int(centers[i, 1]), S - 1), min(int(centers[i, 0]), S - 1)])
