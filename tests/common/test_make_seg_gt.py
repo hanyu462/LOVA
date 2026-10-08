@@ -51,9 +51,9 @@ def unit_test():
         assert gt.heat[i, cy, cx] == 1.0, (i, gt.heat[i, cy, cx])
     assert gt.heat.max() == 1.0 and gt.heat.min() >= 0
     # centroid of the U is outside the mask; the square's and disc's are inside
-    assert bool(gt.center_inside[0]) and bool(gt.center_inside[1]) and not bool(gt.center_inside[2])
+    assert bool(gt.center_pixel_inside[0]) and bool(gt.center_pixel_inside[1]) and not bool(gt.center_pixel_inside[2])
     gt_d = make_seg_gt(t, 3, SegGtCfg(center="deepest"))
-    assert bool(gt_d.center_inside.all()), "deepest centre is always inside"
+    assert bool(gt_d.center_pixel_inside.all()), "deepest centre is always inside"
     # ownership: the disc (smaller) owns its centre cell although it lies inside the square
     pos = dict(zip(gt.pos_index.tolist(), gt.pos_inst.tolist()))
     cx, cy = [int(round((float(v) + 0.5) / 8 - 0.5)) for v in gt.centers[1]]
@@ -65,12 +65,13 @@ def unit_test():
         cxi, cyi = [int(round((float(v) + 0.5) / 8 - 0.5)) for v in gt.centers[i]]
         assert occ8[i, y, x] >= 0.25 or (y, x) == (cyi, cxi)
     # ignore: crowd cells and padding cells are not valid, positives are
-    # crowd x 90..120 / y 20..50; padding x >= 100. Cell 11 (x 88..96) is crowd-only, cells >= 13 are padding
+    # crowd x 90..120 / y 20..50; padding x >= 100. Cell 11 (x 88..96) touches crowd, cells >= 13 are padding
     assert not bool(gt.heat_valid[3:6, 11].any()), "crowd -> ignored"
+    assert not bool(gt.heat_valid[2, 11]), "cell with only a few crowd pixels (rows 20..24 of 16..24) is ignored too (any-pixel rule)"
     assert not bool(gt.heat_valid[:, 13:].any()), "padding -> ignored"
     assert bool(gt.heat_valid[3:6, 0:10].all()), "ordinary background stays valid"
     assert bool(gt.heat_valid.view(-1)[gt.pos_index].all())
-    assert not bool(gt.mask_valid[:, 25:].any()) and not bool(gt.mask_valid[6:12, 23:25].any())
+    assert not bool(gt.mask_valid[:, 25:].any()) and not bool(gt.mask_valid[5:13, 22:25].any())
     assert bool(make_seg_gt(t, 3, SegGtCfg(crowd_ignore=False)).heat_valid[3:6, 11].all())
     # soft masks at stride 4: area preserved
     assert abs(float(gt.masks_s4[0].sum()) * 16 - float(t.masks[0].sum())) < 1
@@ -79,10 +80,13 @@ def unit_test():
                      torch.ones(64, 64, dtype=torch.bool), torch.zeros(0, dtype=torch.long), [], 0, TransformParams(1, 64, 64, False, 0, 0), (64, 64))
     g0 = make_seg_gt(t0, 3)
     assert g0.heat.sum() == 0 and len(g0.pos_index) == 0 and g0.masks_s4.shape == (0, 16, 16)
-    # max_pos cap and reproducibility
+    # max_pos cap: every instance keeps >= 1 positive, total == cap, reproducible
     g1 = make_seg_gt(t, 3, SegGtCfg(max_pos=4), torch.Generator().manual_seed(0))
     g2 = make_seg_gt(t, 3, SegGtCfg(max_pos=4), torch.Generator().manual_seed(0))
     assert len(g1.pos_index) == 4 and torch.equal(g1.pos_index, g2.pos_index)
+    assert set(g1.pos_inst.tolist()) == {0, 1, 2}, "no instance loses all its positives"
+    g3 = make_seg_gt(t, 3, SegGtCfg(max_pos=2), torch.Generator().manual_seed(0))
+    assert len(g3.pos_index) == 3 and set(g3.pos_inst.tolist()) == {0, 1, 2}, "cap below #instances still keeps one each"
     print("make_seg_gt unit test OK")
 
 
@@ -96,7 +100,7 @@ def stats(cs, a):
         s = load(cs, ids[int(k)])
         t = transform(s, TransformCfg(size=a.size, train=False), torch.Generator().manual_seed(int(k)))
         gt = make_seg_gt(t, cs.num_classes, SegGtCfg(center=a.center))
-        n_inst += len(t); n_out += int((~gt.center_inside).sum()); n_pos += len(gt.pos_index)
+        n_inst += len(t); n_out += int((~gt.center_pixel_inside).sum()); n_pos += len(gt.pos_index)
     print(f"{a.stats} images, {n_inst} instances: centre outside the mask {n_out} ({n_out / max(n_inst, 1):.1%}), "
           f"positives per instance {n_pos / max(n_inst, 1):.2f}  [center={a.center}]")
 
@@ -132,7 +136,7 @@ def main():
     for i in range(len(t)):
         npos = int((gt.pos_inst == i).sum())
         sigma = max(0.8, (float(t.masks[i].sum()) ** 0.5) / 8 / 6)
-        print(f"  {names[i][:13]:<14}{int(t.masks[i].sum()):>9}{str(bool(gt.center_inside[i])):>11}{npos:>6}{sigma:>7.2f}")
+        print(f"  {names[i][:13]:<14}{int(t.masks[i].sum()):>9}{str(bool(gt.center_pixel_inside[i])):>11}{npos:>6}{sigma:>7.2f}")
 
     base = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
     img = overlay_masks(base, t.masks, filled=[], labels=names)
@@ -142,7 +146,7 @@ def main():
         d.rectangle([x * 8, y * 8, x * 8 + 7, y * 8 + 7], outline=(255, 255, 0), width=1)
     for i in range(len(t)):
         cx, cy = gt.centers[i].tolist()
-        col = (0, 255, 0) if gt.center_inside[i] else (255, 0, 0)
+        col = (0, 255, 0) if gt.center_pixel_inside[i] else (255, 0, 0)
         d.line([cx - 5, cy - 5, cx + 5, cy + 5], fill=col, width=2); d.line([cx - 5, cy + 5, cx + 5, cy - 5], fill=col, width=2)
     hm = gt.heat.max(0).values
     hm = torch.nn.functional.interpolate(hm[None, None], size=(S, S), mode="nearest")[0, 0]
