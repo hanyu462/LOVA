@@ -1,8 +1,8 @@
 """Step 5: (target mask, pointer) -> R_GT, the pseudo ground truth for the R predictor.
 
-    R_GT = make_rgt(mask, pointer, cfg)        [S/stride, S/stride] in [0, 1]
+    R_GT = make_r_gt(mask, pointer, cfg)        [S/stride, S/stride] in [0, 1]
 
-Three candidate definitions (RgtCfg.mode), compared side by side in tests/common/test_make_rgt.py.
+Three candidate definitions (RgtCfg.mode), compared side by side in tests/common/test_make_r_gt.py.
 Decision (2026-10-08): C "radial_bias" with gamma 2, sigma_frac 1.25, eta 0.3, band_px 96 is the V0
 definition: a pointer-centred computational prior (not an object-shape field) with the target mask
 as a soft bias. A stays as the comparison baseline, B as the ablation without the mask bias.
@@ -146,7 +146,7 @@ def soft_mask(mask_s: torch.Tensor, band_cells: float) -> torch.Tensor:
     return (1.0 - (d - 0.5).clamp(min=0) / band_cells).clamp(0, 1)
 
 
-def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
+def make_r_gt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
     """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_GT [S/stride, S/stride] in [0, 1]
     according to cfg.mode (see module docstring)."""
     mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)

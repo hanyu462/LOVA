@@ -1,5 +1,5 @@
 """Grid geometry on [h, w] bool / float tensors (CPU or GPU). No policy here: pointer.py decides
-where pointers go and make_rgt.py defines R; both are built from these primitives.
+where pointers go and make_r_gt.py defines R; both are built from these primitives.
 
     downsample_mask(mask, stride)          area average >= thr
     pointer_to_stride(xy, stride)          half-pixel convention p' = (p + 0.5) / stride - 0.5

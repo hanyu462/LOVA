@@ -1,8 +1,8 @@
-"""lova.data.common.make_rgt (step 5: geodesic inside profile R_in + outside decay R_out).
+"""lova.data.common.make_r_gt (step 5: geodesic inside profile R_in + outside decay R_out).
 
-    python tests/common/test_make_rgt.py                                                  # unit test
-    python tests/common/test_make_rgt.py --root datasets/coco --image-id 39769 --seed 5 --pointers 4
-    python tests/common/test_make_rgt.py --root datasets/coco --image-id 2153 --seed 0 --pointers 4 --gamma 1.0
+    python tests/common/test_make_r_gt.py                                                  # unit test
+    python tests/common/test_make_r_gt.py --root datasets/coco --image-id 39769 --seed 5 --pointers 4
+    python tests/common/test_make_r_gt.py --root datasets/coco --image-id 2153 --seed 0 --pointers 4 --gamma 1.0
 
 Window, one row per pointer on the SAME target instance:
     [RGB + pointer + mask outline | R_in @ stride 2 | R_GT @ stride 2 | R_GT @ stride 4 (supervision) | contours of R_GT @ 4]
@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.utils.geometry import depth, downsample_mask, geodesic, pointer_to_stride, seed_cell  # noqa: E402
-from lova.data.common.make_rgt import (RgtCfg, field_stats, inside_profile, make_r_in, make_rgt,  # noqa: E402
+from lova.data.common.make_r_gt import (RgtCfg, field_stats, inside_profile, make_r_in, make_r_gt,  # noqa: E402
                                        outside_profile, radial_profile, soft_mask, to_supervision)
 from lova.data.common.pointer import PointerCfg, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
 from lova.data.common.select import SelectCfg, select  # noqa: E402
@@ -80,7 +80,7 @@ def unit_test():
     yy, xx = torch.meshgrid(torch.arange(S), torch.arange(S), indexing="ij")
     disc = (yy - 64) ** 2 + (xx - 64) ** 2 < 20 ** 2
     cfg_o = RgtCfg(mode="geodesic", stride=1, lambda_out_px=4.0)
-    r_full = make_rgt(disc, (64, 64), cfg_o)
+    r_full = make_r_gt(disc, (64, 64), cfg_o)
     assert r_full[64, 64] == 1.0 and r_full.shape == (S, S)
     assert float(r_full[disc].min()) > 0.3                           # inside keeps R_in
     bval, ring1 = float(r_full[64, 64 + 19]), float(r_full[64, 64 + 20])   # last cell inside, first outside
@@ -95,11 +95,11 @@ def unit_test():
     assert float(r_full[(euclid < 6 * 4 - 2) & ~disc].min()) > 0.0, "everything inside the cutoff is reached"
     assert float(r_full[0, 0]) == 0.0
     # boundary value is carried outward: the outside near the pointer side is higher than far side
-    rb = make_rgt(m, (27, 30), RgtCfg(mode="geodesic", stride=1, lambda_out_px=6.0))
+    rb = make_r_gt(m, (27, 30), RgtCfg(mode="geodesic", stride=1, lambda_out_px=6.0))
     assert rb[30, 17] > rb[25, 112] > 0, (float(rb[30, 17]), float(rb[25, 112]))
     assert torch.equal(outside_profile(m, inside_profile(m, dg, cfg), RgtCfg(mode="geodesic", stride=1))[m], r[m]), "inside untouched"
     # stride-2 end to end (geodesic): shape and range; supervision at stride 4 = 2x2 area average
-    r2 = make_rgt(m, (27, 30), RgtCfg(mode="geodesic", stride=2))
+    r2 = make_r_gt(m, (27, 30), RgtCfg(mode="geodesic", stride=2))
     assert r2.shape == (64, 64) and r2.min() >= 0 and r2.max() <= 1
     r4 = to_supervision(r2, 2)
     assert r4.shape == (32, 32) and abs(float(r4[0, 0]) - float(r2[0:2, 0:2].mean())) < 1e-6
@@ -107,7 +107,7 @@ def unit_test():
 
     # ---- B radial / C radial_bias ----
     cb = RgtCfg(mode="radial", stride=1, gamma=2.0, sigma_frac=1.0)
-    rB = make_rgt(m, (27, 30), cb)
+    rB = make_r_gt(m, (27, 30), cb)
     assert rB.shape == (S, S) and rB[30, 27] == 1.0
     # same Euclidean distance -> same value, inside or outside the mask
     assert abs(float(rB[30, 27 + 20]) - float(rB[30 + 20, 27])) < 1e-5
@@ -117,14 +117,14 @@ def unit_test():
     ys, xs = torch.nonzero(m, as_tuple=True)
     far = ((ys - 30.0) ** 2 + (xs - 27.0) ** 2).argmax()
     assert abs(float(rB[ys[far], xs[far]]) - math_exp(-1)) < 1e-3
-    rB2 = make_rgt(m, (27, 30), RgtCfg(mode="radial", stride=1, sigma_frac=1.25))
+    rB2 = make_r_gt(m, (27, 30), RgtCfg(mode="radial", stride=1, sigma_frac=1.25))
     assert float(rB2[ys[far], xs[far]]) > 0.5
     # C: soft mask is exactly 1 on the mask (boundary included), ramps 1 -> 0 outside over the band, 0 beyond
     Sm = soft_mask(m, 6)
     assert bool(Sm[m].min() == 1.0) and Sm[60, 60] == 0.0
     assert 0 < float(Sm[30, 18]) < 1 and float(Sm[30, 17]) < float(Sm[30, 18]), "ramp just outside the left arm"
     cc = RgtCfg(mode="radial_bias", stride=1, sigma_frac=1.0, eta=0.3, band_px=6)
-    rC = make_rgt(m, (27, 30), cc)
+    rC = make_r_gt(m, (27, 30), cc)
     assert rC[30, 27] == 1.0, "R(p) = 1"
     assert torch.allclose(rC[m], rB[m]), "on the mask C == B"
     assert abs(float(rC[30, 27 + 40]) - 0.3 * float(rB[30, 27 + 40])) < 1e-5, "beyond the band: eta * B"
@@ -134,18 +134,18 @@ def unit_test():
     # default cfg is the chosen definition
     d = RgtCfg()
     assert d.mode == "radial_bias" and d.sigma_frac == 1.25 and d.eta == 0.3 and d.band_px == 96.0 and d.gamma == 2.0
-    rd = make_rgt(m, (27, 30), RgtCfg(stride=1))            # default mode / parameters, full-res for exact indexing
+    rd = make_r_gt(m, (27, 30), RgtCfg(stride=1))            # default mode / parameters, full-res for exact indexing
     assert rd[30, 27] == 1.0 and float(rd[m].min()) > 0.5, "whole target above 0.5 with the default sigma_frac"
-    assert make_rgt(m, (27, 30)).shape == (64, 64), "default stride 2"
+    assert make_r_gt(m, (27, 30)).shape == (64, 64), "default stride 2"
     # a mask that vanishes at the geometry stride is an error, not a silently wrong field
     thin = torch.zeros(S, S, dtype=torch.bool)
     thin[10, 20] = True                     # single pixel -> area average 0.25 < 0.5 at stride 2 (a 1 px line gives 0.5 and survives)
     try:
-        make_rgt(thin, (20, 10), RgtCfg(stride=2))
+        make_r_gt(thin, (20, 10), RgtCfg(stride=2))
         raise AssertionError("vanished mask must raise")
     except ValueError:
         pass
-    print("make_rgt unit test OK")
+    print("make_r_gt unit test OK")
 
 
 def math_exp(x):
@@ -213,8 +213,8 @@ def main():
     rows = []
     for k in range(a.pointers):
         ptr = sample_from(region, g)
-        r_in = make_r_in(mask, ptr, cfg) if a.mode == "geodesic" else make_rgt(mask, ptr, RgtCfg(**{**cfg.__dict__, "mode": "radial"}))
-        r = r_in if a.inside_only else make_rgt(mask, ptr, cfg)
+        r_in = make_r_in(mask, ptr, cfg) if a.mode == "geodesic" else make_r_gt(mask, ptr, RgtCfg(**{**cfg.__dict__, "mode": "radial"}))
+        r = r_in if a.inside_only else make_r_gt(mask, ptr, cfg)
         r4 = to_supervision(r, max(4 // a.stride, 1))                    # supervision resolution (stride 4)
         up = lambda f: torch.nn.functional.interpolate(f[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
         rr = up(r4)                                                      # contours / numbers below refer to the stride-4 field
@@ -255,7 +255,7 @@ def main():
         y += rw.height + 6
     if a.out:
         os.makedirs(a.out, exist_ok=True)
-        where = os.path.join(a.out, f"rgt_{img_id}_t{idx}_s{a.seed}{'_in' if a.inside_only else ''}.png")
+        where = os.path.join(a.out, f"r_gt_{img_id}_t{idx}_s{a.seed}{'_in' if a.inside_only else ''}.png")
         canvas.save(where)
     else:
         where = "(window)"
@@ -284,7 +284,7 @@ def compare_modes(a, t, mask, mask_s, region, base, name, img_id, idx, g):
         panels = [draw_pointer(overlay_masks(base, mask[None], filled=[], labels=[name]), ptr)]
         titles = [f"pointer {k} ({ptr[0]},{ptr[1]})  {name}"]
         for label, cfg in variants:
-            r = make_rgt(mask, ptr, cfg) * valid_s
+            r = make_r_gt(mask, ptr, cfg) * valid_s
             st = field_stats(r, mask_s, p_s, valid_s, band_cells=int(32 / a.stride))
             print(f"  {'ptr ' + str(k):<10}{label:<24}{st['r_pointer']:>6.2f}{st['r_mask_min']:>10.2f}{st['r_mask_mean']:>10.2f}"
                   f"{st['r_band_mean']:>12.2f}{st['area_gt_half']:>10.3f}")
@@ -306,7 +306,7 @@ def compare_modes(a, t, mask, mask_s, region, base, name, img_id, idx, g):
         y += rw.height + 6
     if a.out:
         os.makedirs(a.out, exist_ok=True)
-        where = os.path.join(a.out, f"rgt_compare{'C' if a.compare_c else ''}_{img_id}_t{idx}_s{a.seed}.png")
+        where = os.path.join(a.out, f"r_gt_compare{'C' if a.compare_c else ''}_{img_id}_t{idx}_s{a.seed}.png")
         canvas.save(where)
     else:
         where = "(window)"
