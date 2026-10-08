@@ -36,6 +36,7 @@ class TransformCfg:
     scale_range: tuple = (0.6, 1.25)  # multiplier on "longest side = size"
     flip_prob: float = 0.5
     mask_thr: float = 0.5             # bilinear-resized soft mask -> bool
+    mask_interp: str = "bilinear"     # "bilinear" (+ mask_thr) or "nearest" for mask / crowd resizing
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,12 @@ def apply(sample: Sample, p: TransformParams, cfg: TransformCfg) -> Transformed:
 
     # masks + crowd: one bilinear resize on the stacked float masks -> threshold -> flip -> crop/pad
     stack = torch.cat([sample.masks, sample.crowd[None]], 0).float()[None]        # [1, N+1, H, W]
-    stack = F.interpolate(stack, size=(p.new_h, p.new_w), mode="bilinear", align_corners=False)[0] >= cfg.mask_thr
+    if cfg.mask_interp == "bilinear":
+        stack = F.interpolate(stack, size=(p.new_h, p.new_w), mode="bilinear", align_corners=False)[0] >= cfg.mask_thr
+    elif cfg.mask_interp == "nearest":
+        stack = F.interpolate(stack, size=(p.new_h, p.new_w), mode="nearest")[0] > 0.5
+    else:
+        raise ValueError(f"mask_interp={cfg.mask_interp!r} (bilinear | nearest)")
     if p.flip:
         stack = stack.flip(-1)
     stack = _place(stack, p, S, fill=False)

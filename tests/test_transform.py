@@ -118,6 +118,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval", action="store_true", help="deterministic transform (resize + pad only)")
     p.add_argument("--out", default=None, help="save PNG here instead of opening a window")
+    p.add_argument("--compare-interp", type=float, default=None, metavar="SCALE",
+                   help="render bilinear+thr vs nearest mask resizing at this fixed scale (e.g. 0.4), zoomed on each mask")
     a = p.parse_args()
 
     unit_test()
@@ -128,6 +130,8 @@ def main():
     cs = open_coco(a.root, a.split)
     img_id = a.image_id if a.image_id is not None else cs.image_ids()[a.index]
     s = load(cs, img_id)
+    if a.compare_interp is not None:
+        return compare_interp(cs, s, a)
     cfg = TransformCfg(size=a.size, train=not a.eval)
     t = transform(s, cfg, torch.Generator().manual_seed(a.seed))
     pr = t.params
@@ -154,6 +158,53 @@ def main():
     else:
         where = "(window)"
         panel.show(title=f"transform {img_id}")
+    print(f"  -> {where}")
+
+
+def compare_interp(cs, s, a):
+    """Same fixed scale, two mask resizers. For each instance: zoomed crop [original | bilinear+0.5 | nearest]
+    and the area each keeps relative to the ideal (original area * scale^2)."""
+    h, w = s.size
+    sc = a.compare_interp
+    pr = TransformParams(scale=sc, new_h=round(h * sc), new_w=round(w * sc), flip=False, crop_x=0, crop_y=0)
+    outs = {m: apply(s, pr, TransformCfg(size=a.size, mask_interp=m)) for m in ("bilinear", "nearest")}
+    names = [cs.name_of_label(int(l)) for l in s.labels]
+    rows = []
+    print(f"image {s.image_id} scale {sc}: mask area kept vs ideal (orig * scale^2)")
+    print(f"  {'instance':<16}{'ideal px':>9}{'bilinear':>10}{'nearest':>9}")
+    for i in range(len(s)):
+        ideal = float(s.masks[i].sum()) * sc * sc
+        ab, an = float(outs["bilinear"].masks[i].sum()), float(outs["nearest"].masks[i].sum())
+        print(f"  {names[i][:15]:<16}{ideal:>9.0f}{ab / max(ideal, 1):>10.2f}{an / max(ideal, 1):>9.2f}")
+        ys, xs = torch.nonzero(s.masks[i], as_tuple=True)
+        if len(ys) == 0:
+            continue
+        pad = 8
+        y0, y1 = max(int(ys.min()) - pad, 0), min(int(ys.max()) + pad, h)
+        x0, x1 = max(int(xs.min()) - pad, 0), min(int(xs.max()) + pad, w)
+        zoom = 2 if (y1 - y0) * (x1 - x0) < 40000 else 1
+        orig = overlay_masks(s.image, s.masks[i:i + 1], labels=[names[i]]).crop((x0, y0, x1, y1))
+        orig = orig.resize((orig.width * zoom, orig.height * zoom), Image.NEAREST)
+        panels = [orig]
+        for m in ("bilinear", "nearest"):
+            t = outs[m]
+            img = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
+            ov = overlay_masks(img, t.masks[i:i + 1]).crop((int(x0 * sc), int(y0 * sc), int(x1 * sc) + 1, int(y1 * sc) + 1))
+            panels.append(ov.resize((orig.width, orig.height), Image.NEAREST))
+        rows.append(hstack(panels, [f"{names[i]} original", f"bilinear+0.5 @ {sc}", f"nearest @ {sc}"]))
+    W = max(r.width for r in rows)
+    canvas = Image.new("RGB", (W, sum(r.height for r in rows) + 6 * len(rows)), (30, 30, 30))
+    y = 0
+    for r in rows:
+        canvas.paste(r, (0, y))
+        y += r.height + 6
+    if a.out:
+        os.makedirs(a.out, exist_ok=True)
+        where = os.path.join(a.out, f"interp_{s.image_id}_{sc}.png")
+        canvas.save(where)
+    else:
+        where = "(window)"
+        canvas.show(title=f"mask interp {s.image_id}")
     print(f"  -> {where}")
 
 
