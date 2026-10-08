@@ -1,8 +1,8 @@
-"""lova.data.common.rtarget (step 5-1: geodesic + inside profile R_in).
+"""lova.data.common.make_rgt (step 5-1: geodesic + inside profile R_in).
 
-    python tests/common/test_rtarget.py                                                  # unit test
-    python tests/common/test_rtarget.py --root datasets/coco --image-id 39769 --seed 5 --pointers 4
-    python tests/common/test_rtarget.py --root datasets/coco --image-id 2153 --seed 0 --pointers 4 --gamma 1.0
+    python tests/common/test_make_rgt.py                                                  # unit test
+    python tests/common/test_make_rgt.py --root datasets/coco --image-id 39769 --seed 5 --pointers 4
+    python tests/common/test_make_rgt.py --root datasets/coco --image-id 2153 --seed 0 --pointers 4 --gamma 1.0
 
 Window, one row per pointer on the SAME target instance:
     [RGB + pointer | target mask | R_in heatmap (red high, blue low) | R_in contours 0.9 / 0.7 / 0.5 / 0.3]
@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.pointer import PointerCfg, depth, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
-from lova.data.common.rtarget import (RgtCfg, downsample_mask, geodesic_from_pointer, inside_profile,  # noqa: E402
+from lova.data.common.make_rgt import (RgtCfg, downsample_mask, geodesic_from_pointer, inside_profile,  # noqa: E402
                                       make_r_in, pointer_to_stride, seed_cell)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
@@ -73,7 +73,7 @@ def unit_test():
     m2[5:10, 60:70] = True
     r2 = make_r_in(m2, (27, 30), RgtCfg(stride=1))
     assert float(r2[5:10, 60:70].max()) == 0.0
-    print("rtarget (inside) unit test OK")
+    print("make_rgt (inside) unit test OK")
 
 
 def math_exp(x):
