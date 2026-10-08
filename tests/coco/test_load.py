@@ -64,6 +64,7 @@ def unit_test():
         assert s.masks.shape == (3, 100, 200) and s.masks.dtype == torch.bool, "crowd excluded"
         assert s.ann_ids == [10, 11, 12]
         assert s.labels.tolist() == [1, 0, 0] and cs.name_of_label(1) == "car"
+        assert cs.labels_of(["car"]) == frozenset({1}) and cs.labels_of([]) == frozenset()
         assert torch.allclose(s.ratios, torch.tensor([0.5, 0.02, 0.001]))
         assert int(s.masks[0].sum()) == 10000, "polygon rasterised exactly for an axis-aligned square"
         assert bool(s.masks[1, 20, 130]) and not bool(s.masks[1, 20, 100])

@@ -56,6 +56,9 @@ def unit_test():
     assert r_crop[0] == 0 and r_crop[2] > 0                                   # square gone, bar visible
     assert 0 not in select(crop, SelectCfg(0.001)) and select(crop, SelectCfg(0.5)) == []
     assert select(full) == select(full, SelectCfg(0.01)), "default cfg"
+    # class exclusion removes an instance from the candidates but not from the masks
+    assert 0 in select(full, SelectCfg(0.001)) and 0 not in select(full, SelectCfg(0.001, exclude_labels=frozenset({0})))
+    assert full.masks.shape[0] == 3
     print("select unit test OK")
 
 

@@ -1,7 +1,14 @@
 """Step 3: which instances of a TRANSFORMED sample may be pointer targets.
 
     ratio_i = |mask_i ∧ valid| / |valid|       visible instance area over visible image area
-    keep    = { i : ratio_i >= threshold }     largest first
+    keep    = { i : ratio_i >= threshold  and  label_i not in exclude_labels }     largest first
+
+exclude_labels: classes that are never pointer targets (still segmentation targets). Meant for
+"surface" objects such as dining table / bed / couch: other objects sit on them, their masks are
+riddled with holes, and a pointer on them makes R_GT cover half the image. Label indices are
+dataset-specific, so the reader converts names (CocoSet.labels_of). COCO working list (val2017,
+600 images): dining table 4.2 % of candidates / owned p10 68 %, bed 1.2 % / 67 %, bench 1.1 % / 68 %,
+couch 1.8 % / 98 %. chair (6.7 %, owned p10 97 %) stays a target.
 
     cands = select(transformed, SelectCfg(threshold=0.01))   -> list[int] indices into transformed.masks
 
@@ -26,6 +33,7 @@ class SelectCfg:
     threshold: float = 0.01   # visible-area ratio a pointer target must reach. Working value, not
                               # final: val2017 at 0.01 -> 93 % of images have a candidate, 42 % of
                               # instances qualify (person-sized objects stay, bats / clocks drop)
+    exclude_labels: frozenset = frozenset()   # label indices never used as pointer targets
 
 
 def visible_ratios(masks: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -45,4 +53,8 @@ def keep_by_ratio(ratios: torch.Tensor, threshold: float) -> list[int]:
 
 def select(t: Transformed, cfg: SelectCfg = SelectCfg()) -> list[int]:
     """Pointer candidates of a transformed sample (indices into t.masks), largest first."""
-    return keep_by_ratio(visible_ratios(t.masks, t.valid), cfg.threshold)
+    ratios = visible_ratios(t.masks, t.valid)
+    if cfg.exclude_labels:
+        excluded = torch.tensor([int(l) in cfg.exclude_labels for l in t.labels], dtype=torch.bool)
+        ratios = torch.where(excluded, torch.zeros_like(ratios) - 1.0, ratios)   # -1 never passes
+    return keep_by_ratio(ratios, cfg.threshold)

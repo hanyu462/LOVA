@@ -45,6 +45,14 @@ class CocoSet:
     def name_of_label(self, label: int) -> str:
         return self.names[self.cat_ids[label]]
 
+    def labels_of(self, names) -> frozenset:
+        """Class names -> label indices (e.g. for SelectCfg.exclude_labels)."""
+        by_name = {n: i for i, n in ((self.cat_to_label[c], self.names[c]) for c in self.cat_ids)}
+        missing = [n for n in names if n not in by_name]
+        if missing:
+            raise KeyError(f"unknown COCO class names: {missing}")
+        return frozenset(by_name[n] for n in names)
+
 
 def open_coco(root: str, split: str = "train2017") -> CocoSet:
     """Reads root/annotations/instances_{split}.json. Images are expected at root/{split}/."""
