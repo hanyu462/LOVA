@@ -55,6 +55,9 @@ def get_args():
     p.add_argument("--bs", type=int, default=8)
     p.add_argument("--det-thr", type=float, default=0.3, help="score threshold for 'detected'")
     p.add_argument("--viz", type=int, default=0, help="save N visualization PNGs")
+    p.add_argument("--no-bin-ap", action="store_true",
+                   help="skip per-R-bin / per-distance-bin COCO AP (each bin is a full COCOeval pass); "
+                        "overall AP and the bin tables are still computed")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="eval/exp")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -299,17 +302,17 @@ def main():
 
     if a.data == "coco" and not a.sweep:
         summary["AP_all"] = coco_ap(ds.coco, results, img_ids)
-        summary["AP_by_R"] = {}
-        for lo, hi in zip(R_BINS[:-1], R_BINS[1:]):
-            keep = {r["ann_id"] for r in rows if lo <= r["mean_r"] < hi}
-            if keep:
-                summary["AP_by_R"][f"[{lo:.1f},{hi:.1f})"] = coco_ap(ds.coco, results, img_ids, keep)
-        summary["AP_by_dist"] = {}
-        for lo, hi in zip(D_BINS[:-1], D_BINS[1:]):
-            keep = {r["ann_id"] for r in rows if lo <= r["dist"] < hi}
-            if keep:
-                label = "inside(=0)" if hi <= 1e-6 else f"[{lo:.2f},{hi:.2f})"
-                summary["AP_by_dist"][label] = coco_ap(ds.coco, results, img_ids, keep)
+        summary["AP_by_R"], summary["AP_by_dist"] = {}, {}
+        if not a.no_bin_ap:
+            for lo, hi in zip(R_BINS[:-1], R_BINS[1:]):
+                keep = {r["ann_id"] for r in rows if lo <= r["mean_r"] < hi}
+                if keep:
+                    summary["AP_by_R"][f"[{lo:.1f},{hi:.1f})"] = coco_ap(ds.coco, results, img_ids, keep)
+            for lo, hi in zip(D_BINS[:-1], D_BINS[1:]):
+                keep = {r["ann_id"] for r in rows if lo <= r["dist"] < hi}
+                if keep:
+                    label = "inside(=0)" if hi <= 1e-6 else f"[{lo:.2f},{hi:.2f})"
+                    summary["AP_by_dist"][label] = coco_ap(ds.coco, results, img_ids, keep)
         print("\n== mask AP:", json.dumps({k: summary[k] for k in ("AP_all", "AP_by_R", "AP_by_dist")}, indent=1))
 
     json.dump(summary, open(os.path.join(a.out, "summary.json"), "w"), indent=1, default=float)
