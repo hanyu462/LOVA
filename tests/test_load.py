@@ -1,8 +1,9 @@
 """lova.data.coco.load: unit test on an in-memory COCO + visual check on real COCO.
 
     python tests/test_load.py                                   # unit test only (no data)
-    python tests/test_load.py --coco-root datasets/coco --n 4   # + PNGs in viz/load/
+    python tests/test_load.py --coco-root datasets/coco --n 4   # + opens a window per image
     python tests/test_load.py --coco-root datasets/coco --image-id 139
+    python tests/test_load.py --coco-root datasets/coco --n 4 --out viz/load   # save PNGs instead (headless server)
 
 PNG = original image with every instance mask filled + outlined, label "class ratio";
 crowd (ignore) regions, if any, are hatched in grey.
@@ -100,7 +101,7 @@ def main():
     p.add_argument("--n", type=int, default=4)
     p.add_argument("--image-id", type=int, default=None)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out", default="viz/load")
+    p.add_argument("--out", default=None, help="save PNGs here instead of opening a window")
     a = p.parse_args()
 
     unit_test()
@@ -109,21 +110,26 @@ def main():
     cs = open_coco(a.coco_root, a.split)
     ids = [a.image_id] if a.image_id is not None else \
         [int(i) for i in np.random.RandomState(a.seed).choice(cs.image_ids(), a.n, replace=False)]
-    os.makedirs(a.out, exist_ok=True)
+    if a.out:
+        os.makedirs(a.out, exist_ok=True)
     for img_id in ids:
         s = check_real(cs, img_id)
         labels = [f"{cs.name_of_label(int(l))} {float(r):.3f}" for l, r in zip(s.labels, s.ratios)]
-        path = os.path.join(a.out, f"load_{img_id}.png")
         img = overlay_masks(s.image, s.masks, labels=labels)
         if s.crowd.any():
             arr = np.asarray(img).copy()
             hatch = s.crowd.numpy() & (((np.arange(s.size[0])[:, None] + np.arange(s.size[1])[None]) % 6) < 2)
             arr[hatch] = (arr[hatch] * 0.3 + 255 * 0.7).astype(np.uint8)
             img = Image.fromarray(arr)
-        img.save(path)
+        if a.out:
+            where = os.path.join(a.out, f"load_{img_id}.png")
+            img.save(where)
+        else:
+            where = "(window)"
+            img.show(title=f"load {img_id}")
         big = sum(float(r) >= 0.01 for r in s.ratios)
         crowd = f", crowd {float(s.crowd.float().mean()):.3f} of image" if s.crowd.any() else ""
-        print(f"image {img_id} ({s.size[1]}x{s.size[0]}): {len(s)} instances, {big} with ratio >= 0.01{crowd} -> {path}")
+        print(f"image {img_id} ({s.size[1]}x{s.size[0]}): {len(s)} instances, {big} with ratio >= 0.01{crowd} -> {where}")
         for i in range(min(len(s), 3)):
             print(f"    ann {s.ann_ids[i]} {cs.name_of_label(int(s.labels[i])):<12} raster {int(s.masks[i].sum()):>7} px  annotation {float(s.areas[i]):>9.1f}")
 
