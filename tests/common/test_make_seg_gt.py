@@ -54,6 +54,13 @@ def unit_test():
     assert bool(gt.center_pixel_inside[0]) and bool(gt.center_pixel_inside[1]) and not bool(gt.center_pixel_inside[2])
     gt_d = make_seg_gt(t, 3, SegGtCfg(center="deepest"))
     assert bool(gt_d.center_pixel_inside.all()), "deepest centre is always inside"
+    # deepest_owned: the square's centre moves off the disc that sits inside it; plain deepest stays on the disc
+    cx, cy = gt_d.centers[0].tolist()
+    assert bool(t.masks[1, int(cy), int(cx)]), "deepest of the square lands on the (covering) disc"
+    gt_o = make_seg_gt(t, 3, SegGtCfg(center="deepest_owned"))
+    cx, cy = gt_o.centers[0].tolist()
+    assert bool(t.masks[0, int(cy), int(cx)]) and not bool(t.masks[1, int(cy), int(cx)]), "owned: on the square, off the disc"
+    assert bool(gt_o.center_pixel_inside.all())
     # ownership: the disc (smaller) owns its centre cell although it lies inside the square
     pos = dict(zip(gt.pos_index.tolist(), gt.pos_inst.tolist()))
     cx, cy = [int(round((float(v) + 0.5) / 8 - 0.5)) for v in gt.centers[1]]
@@ -111,7 +118,7 @@ def main():
     p.add_argument("--size", type=int, default=640)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval", action="store_true")
-    p.add_argument("--center", default="centroid", choices=["centroid", "deepest"])
+    p.add_argument("--center", default="centroid", choices=["centroid", "deepest", "deepest_owned"])
     p.add_argument("--stats", type=int, default=0, help="N random images: centre-outside rate etc. (no window)")
     p.add_argument("--out", default=None)
     a = p.parse_args()

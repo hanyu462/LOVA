@@ -23,8 +23,13 @@ mask of "the instance centred at q". The GT therefore has three parts and an ign
     center_pixel_inside [N]    whether the centre PIXEL lies on the instance mask (concave shapes may
                                not for "centroid"); the stride-8 centre cell is always a positive anyway
 
-Centre definition (cfg.center): "centroid" (mask centroid, V0) or "deepest" (cell with the largest
-depth, always inside the mask). Gaussian sigma = max(sigma_min, sqrt(area) / 8 / sigma_div) cells.
+Centre definition (cfg.center):
+    "centroid"       mask centroid (V0). Outside the mask for ~6 % of COCO instances (concave shapes)
+    "deepest"        cell with the largest depth of the mask: always on the mask
+    "deepest_owned"  same, but on the pixels the instance OWNS (minus every smaller instance that
+                     covers it, the pointer ownership rule). A dining table annotated together with
+                     the plates on it gets its centre on visible table, not on a plate
+Gaussian sigma = max(sigma_min, sqrt(area) / 8 / sigma_div) cells.
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ import torch
 import torch.nn.functional as F
 
 from ...utils.geometry import depth
+from .pointer import pointer_region
 from .transform import Transformed
 
 
@@ -42,7 +48,7 @@ from .transform import Transformed
 class SegGtCfg:
     stride_heat: int = 8        # heatmap / kernel grid
     stride_mask: int = 4        # mask feature grid (dice targets)
-    center: str = "centroid"    # "centroid" | "deepest"
+    center: str = "centroid"    # "centroid" | "deepest" | "deepest_owned"
     sigma_min: float = 0.8      # gaussian sigma lower bound (cells)
     sigma_div: float = 6.0      # sigma = object size (cells) / sigma_div
     pos_occupancy: float = 0.25 # a 3x3 neighbour cell counts as inside if >= this fraction of it is mask
@@ -64,7 +70,7 @@ class SegGT:
 
 
 def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Tensor:
-    """[N, S, S] bool -> [N, 2] (x, y) full-res pixels. "deepest" works on the mask at `stride`."""
+    """[N, S, S] bool -> [N, 2] (x, y) full-res pixels. "deepest*" work on the mask at `stride`."""
     n, h, w = masks.shape
     out = torch.zeros(n, 2)
     if n == 0:
@@ -77,20 +83,25 @@ def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Te
         out[:, 0] = (m * xs).sum((1, 2)) / area
         out[:, 1] = (m * ys).sum((1, 2)) / area
         return out
-    if how == "deepest":
+    if how in ("deepest", "deepest_owned"):
         st, half = stride, (stride - 1) / 2
         for i in range(n):
-            occ = F.avg_pool2d(masks[i][None, None].float(), st)[0, 0]         # occupancy at `stride`
+            region = pointer_region(i, masks) if how == "deepest_owned" else masks[i]
+            if not region.any():                                                # fully covered by smaller instances
+                region = masks[i]
+            occ = F.avg_pool2d(region[None, None].float(), st)[0, 0]            # occupancy at `stride`
             small = occ >= 0.5 if bool((occ >= 0.5).any()) else occ > 0
-            score = depth(small) + occ                                          # deepest cell, ties -> most occupied
+            # for a CENTRE the canvas border counts as a boundary (unlike pointer depth): pad with False
+            d = depth(F.pad(small, (1, 1, 1, 1), value=False))[1:-1, 1:-1]
+            score = d + occ                                                     # deepest cell, ties -> most occupied
             j = int(score.flatten().argmax())
             cy, cx = j // small.shape[1], j % small.shape[1]
-            block = masks[i, cy * st:cy * st + st, cx * st:cx * st + st]         # a mask pixel inside that cell,
+            block = region[cy * st:cy * st + st, cx * st:cx * st + st]           # a region pixel inside that cell,
             by, bx = torch.nonzero(block, as_tuple=True)                        # closest to the cell centre
             k = int(((by.float() - half) ** 2 + (bx.float() - half) ** 2).argmin())
             out[i, 0], out[i, 1] = cx * st + int(bx[k]), cy * st + int(by[k])
         return out
-    raise ValueError(f"center={how!r} (centroid | deepest)")
+    raise ValueError(f"center={how!r} (centroid | deepest | deepest_owned)")
 
 
 def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
