@@ -83,6 +83,22 @@ def unit_test():
     assert bool(make_seg_gt(t, 3, SegGtCfg(crowd_ignore=False)).heat_valid[3:6, 11].all())
     # soft masks at stride 4: area preserved
     assert abs(float(gt.masks_s4[0].sum()) * 16 - float(t.masks[0].sum())) < 1
+    # an instance whose whole 3x3 centre window is taken by smaller instances reclaims one of its
+    # other (unowned) cells; cells owned by a smaller instance are never stolen
+    S2 = 64
+    big = torch.zeros(S2, S2, dtype=torch.bool); big[8:40, 8:40] = True          # cells 1..4 x 1..4, centroid cell (2, 2)
+    smalls = []
+    for dy in range(3):
+        for dx in range(3):
+            m_ = torch.zeros(S2, S2, dtype=torch.bool)
+            m_[8 + dy * 8 + 2:8 + dy * 8 + 7, 8 + dx * 8 + 2:8 + dx * 8 + 7] = True   # 5x5 blob in cells 1..3 x 1..3
+            smalls.append(m_)
+    masks_c = torch.stack([big] + smalls)
+    t_c = Transformed(torch.zeros(3, S2, S2), masks_c, torch.zeros(S2, S2, dtype=torch.bool), torch.ones(S2, S2, dtype=torch.bool),
+                      torch.zeros(len(masks_c), dtype=torch.long), list(range(len(masks_c))), 0, TransformParams(1, S2, S2, False, 0, 0), (S2, S2))
+    g_c = make_seg_gt(t_c, 3, SegGtCfg(center="centroid"))
+    assert 0 in g_c.pos_inst.tolist(), "big instance reclaims an unowned occupied cell"
+    assert set(g_c.pos_inst.tolist()) == set(range(len(masks_c)))
     # an instance with no visible pixel (cropped away): no peak, no positives, centre (-1, -1)
     t_inv = fake_transformed()
     t_inv.masks[1] = False

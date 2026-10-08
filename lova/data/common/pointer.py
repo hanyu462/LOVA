@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from ...utils.geometry import depth, erode  # grid primitives live in lova/utils/geometry.py; this file is policy only
+from ...utils.geometry import depth, erode, owner_map  # grid primitives live in lova/utils/geometry.py; this file is policy only
 from .transform import Transformed
 
 
@@ -78,17 +78,13 @@ def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Ten
     return safe
 
 
-def pointer_region(idx: int, masks: torch.Tensor) -> torch.Tensor:
+def pointer_region(idx: int, masks: torch.Tensor, owners: torch.Tensor | None = None) -> torch.Tensor:
     """masks [N, S, S] bool -> [S, S] bool: pixels of instance idx that it OWNS (not covered by any
-    smaller instance; ties broken by lower index)."""
-    areas = masks.flatten(1).sum(1)
-    own = masks[idx].clone()
-    for j in range(masks.shape[0]):
-        if j == idx:
-            continue
-        if areas[j] < areas[idx] or (areas[j] == areas[idx] and j < idx):
-            own &= ~masks[j]
-    return own
+    smaller instance; ties broken by lower index). Pass `owners = owner_map(masks)` when calling
+    for several instances of the same sample (computed once instead of N times)."""
+    if owners is None:
+        owners = owner_map(masks)
+    return owners == idx
 
 
 def owner_of(xy, masks: torch.Tensor) -> int | None:

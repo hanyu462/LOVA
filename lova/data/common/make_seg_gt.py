@@ -43,8 +43,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from ...utils.geometry import depth
-from .pointer import pointer_region
+from ...utils.geometry import depth_l1, owner_map
 from .transform import Transformed
 
 
@@ -91,20 +90,25 @@ def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Te
         return out
     if how in ("deepest", "deepest_owned"):
         st, half = stride, (stride - 1) / 2
+        regions = masks
+        if how == "deepest_owned":
+            owners = owner_map(masks)                                           # one pass for all instances
+            regions = masks & (owners[None] == torch.arange(n).view(-1, 1, 1))
+            covered = ~regions.flatten(1).any(1) & visible                      # fully covered -> whole mask
+            regions[covered] = masks[covered]
+        occ = F.avg_pool2d(regions[:, None].float(), st)[:, 0]                 # [N, h/st, w/st] occupancy
+        has_half = (occ >= 0.5).flatten(1).any(1).view(-1, 1, 1)
+        small = torch.where(has_half, occ >= 0.5, occ > 0)
+        # for a CENTRE the canvas border counts as a boundary (unlike pointer depth): pad with False;
+        # Manhattan depth is exact, separable and batched (Euclidean precision is not needed here)
+        d = depth_l1(F.pad(small, (1, 1, 1, 1), value=False))[:, 1:-1, 1:-1]
+        score = (d + occ).flatten(1)                                            # deepest cell, ties -> most occupied
         for i in range(n):
             if not visible[i]:
                 continue
-            region = pointer_region(i, masks) if how == "deepest_owned" else masks[i]
-            if not region.any():                                                # fully covered by smaller instances
-                region = masks[i]
-            occ = F.avg_pool2d(region[None, None].float(), st)[0, 0]            # occupancy at `stride`
-            small = occ >= 0.5 if bool((occ >= 0.5).any()) else occ > 0
-            # for a CENTRE the canvas border counts as a boundary (unlike pointer depth): pad with False
-            d = depth(F.pad(small, (1, 1, 1, 1), value=False))[1:-1, 1:-1]
-            score = d + occ                                                     # deepest cell, ties -> most occupied
-            j = int(score.flatten().argmax())
-            cy, cx = j // small.shape[1], j % small.shape[1]
-            block = region[cy * st:cy * st + st, cx * st:cx * st + st]           # a region pixel inside that cell,
+            j = int(score[i].argmax())
+            cy, cx = j // small.shape[2], j % small.shape[2]
+            block = regions[i, cy * st:cy * st + st, cx * st:cx * st + st]       # a region pixel inside that cell,
             by, bx = torch.nonzero(block, as_tuple=True)                        # closest to the cell centre
             k = int(((by.float() - half) ** 2 + (bx.float() - half) ** 2).argmin())
             out[i, 0], out[i, 1] = cx * st + int(bx[k]), cy * st + int(by[k])
@@ -156,6 +160,16 @@ def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
         win[cy - y0, cx - x0] = True                                           # centre cell always owned
         owner[y0:y1, x0:x1][win] = i
 
+    # an instance whose 3x3 window was entirely overwritten by smaller instances (0.3 % of val2017
+    # instances) reclaims its most-occupied cell that nobody owns. Cells owned by smaller instances
+    # are never taken back, so an instance covered at every cell can still end up without one (rare)
+    owned_by = set(owner.flatten().tolist())
+    for i in range(n):
+        if area[i] > 0 and i not in owned_by:
+            cand = torch.where(owner < 0, occ8[i], torch.zeros_like(occ8[i]))
+            if cand.max() > 0:
+                j = int(cand.flatten().argmax())
+                owner.view(-1)[j] = i
     pos_index = torch.nonzero(owner.flatten() >= 0, as_tuple=False)[:, 0]
     pos_inst = owner.flatten()[pos_index]
     heat_valid.view(-1)[pos_index] = True                                      # positives are never ignored

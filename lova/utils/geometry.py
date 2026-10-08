@@ -25,12 +25,12 @@ INF = float("inf")
 
 
 def shift(x: torch.Tensor, dy: int, dx: int, fill: float) -> torch.Tensor:
-    """out[y, x] = x[y - dy, x - dx], `fill` outside. x [h, w]."""
-    h, w = x.shape
+    """out[..., y, x] = x[..., y - dy, x - dx], `fill` outside. x [..., h, w] (any leading dims)."""
+    h, w = x.shape[-2:]
     out = torch.full_like(x, fill)
     ys, yd = (slice(0, h - dy), slice(dy, h)) if dy >= 0 else (slice(-dy, h), slice(0, h + dy))
     xs, xd = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
-    out[yd, xd] = x[ys, xs]
+    out[..., yd, xd] = x[..., ys, xs]
     return out
 
 
@@ -66,8 +66,9 @@ def seed_cell(mask: torch.Tensor, p: tuple[float, float]) -> tuple[int, int]:
 # ---- distances ----------------------------------------------------------------------------------
 
 def distance_to(target: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
-    """target [h, w] bool -> [h, w] float: chamfer distance (cells) to the nearest TRUE cell
-    (0 on TRUE cells, +inf if empty or not reached within max_iter steps)."""
+    """target [..., h, w] bool -> [..., h, w] float: chamfer distance (cells) to the nearest TRUE cell
+    (0 on TRUE cells, +inf if empty or not reached within max_iter steps). Leading dims are
+    propagated together (one loop for a whole batch of masks)."""
     d = torch.where(target, torch.zeros_like(target, dtype=torch.float32), torch.full_like(target, INF, dtype=torch.float32))
     for _ in range(max_iter):
         best = d
@@ -80,21 +81,76 @@ def distance_to(target: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
 
 
 def depth(mask: torch.Tensor) -> torch.Tensor:
-    """mask [h, w] bool -> [h, w] float: 0 on the outermost ring (cells with a non-mask neighbour),
-    1 one ring further in, ... ; 0 outside. The canvas border is NOT a boundary (the object may
-    continue beyond it), so a mask touching the border keeps growing depth there."""
+    """mask [..., h, w] bool -> [..., h, w] float: 0 on the outermost ring (cells with a non-mask
+    neighbour), 1 one ring further in, ... ; 0 outside. The canvas border is NOT a boundary (the
+    object may continue beyond it), so a mask touching the border keeps growing depth there."""
     d = (distance_to(~mask) - 1.0).clamp(min=0)
     return torch.where(mask, d, torch.zeros_like(d))
 
 
+def depth_chebyshev(mask: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
+    """mask [..., h, w] bool -> [..., h, w] float: number of 3x3 erosions a cell survives (0 on the
+    outermost ring, Chebyshev metric). Cheaper than depth() (one max_pool per ring) and enough for
+    "which cell is deepest" decisions. The canvas border is NOT a boundary (same as depth())."""
+    lead = mask.shape[:-2]
+    m = mask.reshape(-1, 1, *mask.shape[-2:])
+    d = torch.zeros_like(m, dtype=torch.float32)
+    for _ in range(max_iter):
+        m = F.max_pool2d((~m).float(), 3, 1, 1) == 0          # erode (border padding counts as inside)
+        if not m.any():
+            break
+        d += m.float()
+    return d.reshape(*lead, *mask.shape[-2:])
+
+
+def distance_l1(target: torch.Tensor) -> torch.Tensor:
+    """target [..., h, w] bool -> [..., h, w] float: exact Manhattan (L1) distance to the nearest TRUE
+    cell, +inf if none. Separable: a forward + backward scan along x, then along y (min-plus with
+    unit cost), i.e. 4 * (h + w) vector ops for a whole batch instead of one pass per ring."""
+    inf = float("inf")
+    d = torch.where(target, torch.zeros_like(target, dtype=torch.float32), torch.full_like(target, inf, dtype=torch.float32))
+    for axis in (-1, -2):
+        n = d.shape[axis]
+        d = d.movedim(axis, -1)
+        for x in range(1, n):
+            d[..., x] = torch.minimum(d[..., x], d[..., x - 1] + 1)
+        for x in range(n - 2, -1, -1):
+            d[..., x] = torch.minimum(d[..., x], d[..., x + 1] + 1)
+        d = d.movedim(-1, axis)
+    return d
+
+
+def depth_l1(mask: torch.Tensor) -> torch.Tensor:
+    """mask [..., h, w] bool -> [..., h, w] float: Manhattan depth, 0 on the outermost ring (cells
+    4-adjacent to a non-mask cell), +1 per ring inward; 0 outside. Canvas border is NOT a boundary.
+    Exact and loop-free in the number of rings: for "which cell is deepest" decisions."""
+    d = (distance_l1(~mask) - 1.0).clamp(min=0)
+    return torch.where(mask, d, torch.zeros_like(d))
+
+
 def erode(mask: torch.Tensor, px: int) -> torch.Tensor:
-    """mask [S, S] bool -> cells with Chebyshev distance >= px + 1 from any non-mask cell
+    """mask [..., S, S] bool -> cells with Chebyshev distance >= px + 1 from any non-mask cell
     (3x3 / 8-neighbour erosion applied px times)."""
     m = mask
+    lead = m.shape[:-2]
     for _ in range(px):
-        inv = (~m)[None, None].float()
-        m = F.max_pool2d(inv, 3, 1, 1)[0, 0] == 0
+        inv = (~m).reshape(-1, 1, *m.shape[-2:]).float()
+        m = (F.max_pool2d(inv, 3, 1, 1)[:, 0] == 0).reshape(*lead, *m.shape[-2:])
     return m
+
+
+def owner_map(masks: torch.Tensor) -> torch.Tensor:
+    """masks [N, h, w] bool -> [h, w] long: index of the SMALLEST instance covering each cell
+    (ties -> lower index), -1 where no instance. One pass instead of N^2 mask comparisons."""
+    n, h, w = masks.shape
+    owner = torch.full((h, w), -1, dtype=torch.long, device=masks.device)
+    if n == 0:
+        return owner
+    areas = masks.flatten(1).sum(1)
+    order = sorted(range(n), key=lambda i: (-int(areas[i]), -i))   # largest first; equal area: higher index first
+    for i in order:                                                  # ... so the lower index paints last and wins
+        owner[masks[i]] = i
+    return owner
 
 
 def geodesic(mask: torch.Tensor, seed: tuple[int, int], max_iter: int = 4096) -> torch.Tensor:
