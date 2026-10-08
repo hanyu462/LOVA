@@ -4,7 +4,8 @@
     python tests/test_load.py --coco-root datasets/coco --n 4   # + PNGs in viz/load/
     python tests/test_load.py --coco-root datasets/coco --image-id 139
 
-PNG = original image with every instance mask filled + outlined, label "class ratio".
+PNG = original image with every instance mask filled + outlined, label "class ratio";
+crowd (ignore) regions, if any, are hatched in grey.
 What to look at: do the masks follow the objects? overlapping masks (bed under a cat)?
 fragmented masks (occluded objects)? Those shape the later pointer / R* steps.
 """
@@ -63,12 +64,29 @@ def unit_test():
         assert torch.allclose(s.ratios, torch.tensor([0.5, 0.02, 0.001]))
         assert int(s.masks[0].sum()) == 10000, "polygon rasterised exactly for an axis-aligned square"
         assert bool(s.masks[1, 20, 130]) and not bool(s.masks[1, 20, 100])
+        # crowd region (RLE, column-major: first 5000 px = columns 0..49) is carried separately
+        assert s.crowd.shape == (100, 200) and s.crowd.dtype == torch.bool
+        assert int(s.crowd.sum()) == 5000 and bool(s.crowd[:, :50].all()) and not bool(s.crowd[:, 50:].any())
+        check_shapes(s)
     print("load unit test OK")
 
 
+def check_shapes(s):
+    """Invariants every loaded sample must satisfy (used on the fake and on real images)."""
+    h, w = s.size
+    n = len(s)
+    assert s.image.mode == "RGB"
+    assert s.masks.shape == (n, h, w) and s.masks.dtype == torch.bool
+    assert s.labels.shape == (n,) and s.labels.dtype == torch.long
+    assert len(s.ann_ids) == n and s.areas.shape == (n,) and s.ratios.shape == (n,)
+    assert bool(((s.ratios >= 0) & (s.ratios <= 1)).all())
+    assert s.crowd.shape == (h, w) and s.crowd.dtype == torch.bool
+
+
 def check_real(cs: CocoSet, img_id: int):
-    """Raster area within 5 % of the polygon area; mask inside the bbox."""
+    """Shapes/dtypes + raster area within 5 % of the annotation area."""
     s = load(cs, img_id)
+    check_shapes(s)
     for i in range(len(s)):
         area = int(s.masks[i].sum())
         assert abs(area - float(s.areas[i])) <= max(0.05 * float(s.areas[i]), 20), (s.ann_ids[i], area, float(s.areas[i]))
@@ -96,9 +114,18 @@ def main():
         s = check_real(cs, img_id)
         labels = [f"{cs.name_of_label(int(l))} {float(r):.3f}" for l, r in zip(s.labels, s.ratios)]
         path = os.path.join(a.out, f"load_{img_id}.png")
-        overlay_masks(s.image, s.masks, labels=labels).save(path)
+        img = overlay_masks(s.image, s.masks, labels=labels)
+        if s.crowd.any():
+            arr = np.asarray(img).copy()
+            hatch = s.crowd.numpy() & (((np.arange(s.size[0])[:, None] + np.arange(s.size[1])[None]) % 6) < 2)
+            arr[hatch] = (arr[hatch] * 0.3 + 255 * 0.7).astype(np.uint8)
+            img = Image.fromarray(arr)
+        img.save(path)
         big = sum(float(r) >= 0.01 for r in s.ratios)
-        print(f"image {img_id} ({s.size[1]}x{s.size[0]}): {len(s)} instances, {big} with ratio >= 0.01 -> {path}")
+        crowd = f", crowd {float(s.crowd.float().mean()):.3f} of image" if s.crowd.any() else ""
+        print(f"image {img_id} ({s.size[1]}x{s.size[0]}): {len(s)} instances, {big} with ratio >= 0.01{crowd} -> {path}")
+        for i in range(min(len(s), 3)):
+            print(f"    ann {s.ann_ids[i]} {cs.name_of_label(int(s.labels[i])):<12} raster {int(s.masks[i].sum()):>7} px  annotation {float(s.areas[i]):>9.1f}")
 
 
 if __name__ == "__main__":

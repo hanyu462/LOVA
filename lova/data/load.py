@@ -7,12 +7,17 @@
     sample.masks    bool  [N, H, W]   rasterised polygon of every non-crowd instance
     sample.labels   long  [N]         contiguous class index 0..K-1 (sorted COCO category ids)
     sample.ann_ids  list  [N]         COCO annotation ids (for evaluation / bookkeeping)
-    sample.areas    float [N]         mask area in pixels (from the annotation polygon)
-    sample.ratios   float [N]         areas / (H * W): the quantity later steps threshold on
+    sample.areas    float [N]         COCO annotation area (polygon area; the rasterised mask can
+                                      differ by a few pixels). Cheap; later steps that need the
+                                      area of a transformed mask use mask.sum() instead
+    sample.ratios   float [N]         annotation area / (H * W): what later steps threshold on
+    sample.crowd    bool  [H, W]      union of iscrowd=1 regions: groups of objects without
+                                      individual annotations. Not an instance (never a pointer or
+                                      segmentation target) but NOT background either: the loss
+                                      step must ignore these pixels, so the region is carried along
 
-Nothing is resized, cropped or filtered here. Crowd regions (iscrowd=1) are skipped: they are
-unlabeled blobs, not instances. This is the only module that reads files or uses pycocotools;
-every later step takes tensors, so it can be tested on synthetic masks.
+Nothing is resized, cropped or filtered here. This is the only module that reads files or uses
+pycocotools; every later step takes tensors, so it can be tested on synthetic masks.
 """
 from __future__ import annotations
 
@@ -62,8 +67,9 @@ class Sample:
     masks: torch.Tensor      # [N, H, W] bool
     labels: torch.Tensor     # [N] long
     ann_ids: list[int]
-    areas: torch.Tensor      # [N] float
-    ratios: torch.Tensor     # [N] float
+    areas: torch.Tensor      # [N] float, annotation area
+    ratios: torch.Tensor     # [N] float, annotation area / (H * W)
+    crowd: torch.Tensor      # [H, W] bool, ignore region (union of iscrowd=1)
 
     @property
     def size(self) -> tuple[int, int]:
@@ -76,12 +82,15 @@ class Sample:
 def load(cs: CocoSet, img_id: int) -> Sample:
     info = cs.coco.loadImgs(img_id)[0]
     image = Image.open(os.path.join(cs.root, cs.split, info["file_name"])).convert("RGB")
-    anns = cs.coco.loadAnns(cs.coco.getAnnIds(imgIds=img_id, iscrowd=False))
     h, w = info["height"], info["width"]
+    anns = cs.coco.loadAnns(cs.coco.getAnnIds(imgIds=img_id, iscrowd=False))
     if anns:
         masks = torch.from_numpy(np.stack([cs.coco.annToMask(a) for a in anns])).bool()
     else:
         masks = torch.zeros(0, h, w, dtype=torch.bool)
     labels = torch.tensor([cs.cat_to_label[a["category_id"]] for a in anns], dtype=torch.long)
     areas = torch.tensor([float(a["area"]) for a in anns])
-    return Sample(img_id, image, masks, labels, [a["id"] for a in anns], areas, areas / float(h * w))
+    crowd = torch.zeros(h, w, dtype=torch.bool)
+    for a in cs.coco.loadAnns(cs.coco.getAnnIds(imgIds=img_id, iscrowd=True)):
+        crowd |= torch.from_numpy(cs.coco.annToMask(a)).bool()
+    return Sample(img_id, image, masks, labels, [a["id"] for a in anns], areas, areas / float(h * w), crowd)
