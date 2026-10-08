@@ -88,12 +88,12 @@ def unit_test():
     r = torch.tensor([((x - 64) ** 2 + (y - 64) ** 2) ** 0.5 for x, y in pts])
     inner = float((r < 20).float().mean())            # area fraction of r<20 inside r<~31 (safe disc) ~ 0.4
     assert 0.25 < inner < 0.55, inner                  # uniform over area, not clustered at the centre
-    assert r.max() <= 36   # L1 depth: the safe disc is slightly diamond-shaped (diagonals reach farther)
-    # default cfg (stride 4, erode 2) on the 40 px disc: every pointer is >= 3 px from the outside (depth >= 2)
+    assert r.max() <= 33
+    # default cfg (stride 4, erode 2) on the 40 px disc: true boundary distance of every pointer >= 3 px
     reg4 = sampling_region(circ, PointerCfg())
     fd = depth(circ)
     pts4 = [sample_from(reg4, g) for _ in range(300)]
-    assert min(float(fd[y, x]) for x, y in pts4) >= 2
+    assert min(float(fd[y, x]) for x, y in pts4) >= 3
     # jagged mask: erosion guarantees the margin even where coarse cells touch the boundary
     jag = circ.clone()
     jag[::3, :] &= (xx[::3, :] < 90)   # notches

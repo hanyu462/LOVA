@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from ...utils.geometry import depth_l1, erode, owner_map  # grid primitives live in lova/utils/geometry.py; this file is policy only
+from ...utils.geometry import depth, erode, owner_map  # grid primitives live in lova/utils/geometry.py; this file is policy only
 from .transform import Transformed
 
 
@@ -60,8 +60,8 @@ def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Ten
         small = mask
     if not small.any():
         return torch.zeros_like(mask)
-    d = depth_l1(small)                                   # Manhattan depth: exact, separable, no per-ring loop
-    dmax = d.max()
+    d = depth(small)                                      # chamfer (near-Euclidean) depth: the Step-4 pointer
+    dmax = d.max()                                        # distribution is defined with it; L1 would make it diamond-shaped
     if not torch.isfinite(dmax):
         # no outside cell at all in the coarse mask: the canvas border is not a boundary by
         # convention (the object may continue), so there is no ring to exclude
