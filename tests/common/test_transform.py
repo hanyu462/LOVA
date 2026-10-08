@@ -1,9 +1,9 @@
 """lova.data.common.transform: image / mask / crowd stay aligned under resize, flip, crop, pad.
 
-    python tests/test_transform.py                              # unit tests (synthetic, no data)
-    python tests/test_transform.py --root datasets/coco --image-id 139 --seed 0     # window: original | transformed
-    python tests/test_transform.py --root datasets/coco --image-id 139 --seed 0 --eval          # deterministic eval transform
-    python tests/test_transform.py --root datasets/coco --image-id 139 --seed 3 --out viz/transform
+    python tests/common/test_transform.py                              # unit tests (synthetic, no data)
+    python tests/common/test_transform.py --root datasets/coco --image-id 139 --seed 0     # window: original | transformed
+    python tests/common/test_transform.py --root datasets/coco --image-id 139 --seed 0 --eval          # deterministic eval transform
+    python tests/common/test_transform.py --root datasets/coco --image-id 139 --seed 3 --out viz/transform
 
 Alignment test idea: paint each instance region of a synthetic image in a unique colour; after
 the transform, pixels inside mask i must still have colour i (and padding must be exactly 0).
@@ -18,12 +18,12 @@ import numpy as np
 import torch
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.sample import Sample  # noqa: E402
 from lova.data.common.transform import (TransformCfg, TransformParams, apply, denormalize,  # noqa: E402
                                         sample_params, to_original, transform)
-from tests.common import add_image_args, resolve_image_id  # noqa: E402
-from tests.viz import hstack, overlay_masks  # noqa: E402
+from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
+from tests.util.viz import hstack, overlay_masks  # noqa: E402
 
 COLORS = np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]], np.uint8)
 

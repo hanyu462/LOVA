@@ -1,10 +1,10 @@
 """lova.data.coco.load: unit test on an in-memory COCO + visual check on real COCO.
 
-    python tests/test_load.py                                   # unit test only (no data)
-    python tests/test_load.py --root datasets/coco --n 4   # + opens a window per image
-    python tests/test_load.py --root datasets/coco --image-id 139   # COCO id (sparse: 139, 285, 632, ...)
-    python tests/test_load.py --root datasets/coco --index 0        # k-th image in sorted id order
-    python tests/test_load.py --root datasets/coco --n 4 --out viz/load   # save PNGs instead (headless server)
+    python tests/coco/test_load.py                                   # unit test only (no data)
+    python tests/coco/test_load.py --root datasets/coco --n 4   # + opens a window per image
+    python tests/coco/test_load.py --root datasets/coco --image-id 139   # COCO id (sparse: 139, 285, 632, ...)
+    python tests/coco/test_load.py --root datasets/coco --index 0        # k-th image in sorted id order
+    python tests/coco/test_load.py --root datasets/coco --n 4 --out viz/load   # save PNGs instead (headless server)
 
 PNG = original image with every instance mask filled + outlined, label "class ratio";
 crowd (ignore) regions, if any, are hatched in grey.
@@ -22,10 +22,10 @@ import numpy as np
 import torch
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.coco.load import CocoSet, load, open_coco  # noqa: E402
-from tests.common import add_image_args, resolve_image_id  # noqa: E402
-from tests.viz import overlay_masks  # noqa: E402
+from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
+from tests.util.viz import overlay_masks  # noqa: E402
 
 
 def fake_cocoset(tmpdir: str) -> CocoSet:

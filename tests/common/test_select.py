@@ -1,8 +1,8 @@
 """lova.data.common.select: pointer candidates from the TRANSFORMED masks.
 
-    python tests/test_select.py                                              # unit test (synthetic)
-    python tests/test_select.py --root datasets/coco --image-id 139 --seed 0 # window: one panel per threshold
-    python tests/test_select.py --root datasets/coco --image-id 139 --eval --thresholds 0.005,0.01,0.02
+    python tests/common/test_select.py                                              # unit test (synthetic)
+    python tests/common/test_select.py --root datasets/coco --image-id 139 --seed 0 # window: one panel per threshold
+    python tests/common/test_select.py --root datasets/coco --image-id 139 --eval --thresholds 0.005,0.01,0.02
 
 Panel per threshold on the transformed image: candidate = filled + "class ratio", other = outline.
 The title shows how many candidates survive. Compare with the original-image ratio printed in the
@@ -18,12 +18,12 @@ import numpy as np
 import torch
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.select import SelectCfg, keep_by_ratio, select, visible_ratios  # noqa: E402
 from lova.data.common.transform import TransformCfg, TransformParams, apply, denormalize, transform  # noqa: E402
-from tests.test_transform import synthetic_sample  # noqa: E402
-from tests.common import add_image_args, resolve_image_id  # noqa: E402
-from tests.viz import hstack, overlay_masks  # noqa: E402
+from tests.common.test_transform import synthetic_sample  # noqa: E402
+from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
+from tests.util.viz import hstack, overlay_masks  # noqa: E402
 
 
 def unit_test():

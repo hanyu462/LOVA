@@ -1,8 +1,8 @@
 """lova.data.common.pointer: safe interior + uniform pointer sampling.
 
-    python tests/test_pointer.py                                               # unit test (synthetic)
-    python tests/test_pointer.py --root datasets/coco --image-id 2153 --seed 0 --k 30
-    python tests/test_pointer.py --root datasets/coco --image-id 39769 --seed 5 --k 30 --alpha 0.2
+    python tests/common/test_pointer.py                                               # unit test (synthetic)
+    python tests/common/test_pointer.py --root datasets/coco --image-id 2153 --seed 0 --k 30
+    python tests/common/test_pointer.py --root datasets/coco --image-id 39769 --seed 5 --k 30 --alpha 0.2
 
 Window: transformed image; the chosen instance's mask filled, pixels owned by a smaller instance
 very dark, the excluded boundary band dark, the safe interior bright, k sampled pointers (yellow). Repeated with different generators so
@@ -19,13 +19,13 @@ import numpy as np
 import torch
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.pointer import (PointerCfg, depth, distance_to, make_pointer, owner_of,  # noqa: E402
                                       pick_target, pointer_region, safe_region, sample_pointer)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
-from tests.common import add_image_args, resolve_image_id  # noqa: E402
-from tests.viz import draw_pointer, hstack, overlay_masks  # noqa: E402
+from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
+from tests.util.viz import draw_pointer, hstack, overlay_masks  # noqa: E402
 
 
 def unit_test():
