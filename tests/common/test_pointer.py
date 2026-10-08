@@ -49,18 +49,27 @@ def unit_test():
     circ = (yy - 64) ** 2 + (xx - 64) ** 2 < 40 ** 2
     dep = depth(circ)
     assert dep[64, 64] == dep.max() and dep[0, 0] == 0
-    cfg = PointerCfg(alpha=0.2, depth_stride=1)
+    assert dep[64, 64 + 39] == 0, "outermost ring has depth 0"
+    assert dep[64, 64 + 38] >= 1
+    cfg = PointerCfg(alpha=0.2, depth_stride=1, erode_px=0)
     safe = safe_region(circ, cfg)
     assert safe.sum() < circ.sum() and bool(safe[64, 64]) and not bool(safe[64, 64 + 38])
     assert bool((safe & ~circ).sum() == 0)
-    # alpha = 0 keeps everything, larger alpha shrinks
-    assert torch.equal(safe_region(circ, PointerCfg(alpha=0.0, depth_stride=1)), circ)
-    assert safe_region(circ, PointerCfg(alpha=0.5, depth_stride=1)).sum() < safe.sum()
+    # alpha = 0 keeps everything, larger alpha shrinks; any alpha > 0 drops the boundary ring
+    assert torch.equal(safe_region(circ, PointerCfg(alpha=0.0, depth_stride=1, erode_px=0)), circ)
+    assert safe_region(circ, PointerCfg(alpha=0.5, depth_stride=1, erode_px=0)).sum() < safe.sum()
+    tiny = safe_region(circ, PointerCfg(alpha=0.01, depth_stride=1, erode_px=0))
+    assert not bool((tiny & (depth(circ) == 0) & circ).any())
+    # small object at stride 4 (max depth < 10 cells): the boundary ring is still excluded
+    small_disc = (yy - 64) ** 2 + (xx - 64) ** 2 < 14 ** 2       # radius 14 px = 3.5 cells
+    s_small = safe_region(small_disc, PointerCfg(alpha=0.1, depth_stride=4))
+    full_depth = depth(small_disc)                                  # full-res depth, px
+    assert s_small.any() and float(full_depth[s_small].min()) >= 2, float(full_depth[s_small].min())
     # stride-4 depth gives nearly the same safe region as full-res (differs by a <= 4 px ring)
     yy2, xx2 = torch.meshgrid(torch.arange(256), torch.arange(256), indexing="ij")
     big = (yy2 - 128) ** 2 + (xx2 - 128) ** 2 < 100 ** 2
-    s1 = safe_region(big, PointerCfg(alpha=0.2, depth_stride=1))
-    s4 = safe_region(big, PointerCfg(alpha=0.2, depth_stride=4))
+    s1 = safe_region(big, PointerCfg(alpha=0.2, depth_stride=1, erode_px=0))
+    s4 = safe_region(big, PointerCfg(alpha=0.2, depth_stride=4, erode_px=0))
     assert (s4 ^ s1).float().sum() / s1.float().sum() < 0.2
 
     # sampling: always inside, never in the excluded band, spread over the interior
@@ -71,9 +80,20 @@ def unit_test():
     for x, y in pts:
         assert bool(circ[y, x]) and bool(safe[y, x])
     r = torch.tensor([((x - 64) ** 2 + (y - 64) ** 2) ** 0.5 for x, y in pts])
-    inner = float((r < 20).float().mean())            # area fraction of r<20 inside r<32 (safe disc) ~ 0.39
+    inner = float((r < 20).float().mean())            # area fraction of r<20 inside r<~31 (safe disc) ~ 0.4
     assert 0.25 < inner < 0.55, inner                  # uniform over area, not clustered at the centre
     assert r.max() <= 33
+    # default cfg (stride 4, erode 2) on the 40 px disc: true boundary distance of every pointer >= 3 px
+    reg4 = sampling_region(circ, PointerCfg())
+    fd = depth(circ)
+    pts4 = [sample_from(reg4, g) for _ in range(300)]
+    assert min(float(fd[y, x]) for x, y in pts4) >= 3
+    # jagged mask: erosion guarantees the margin even where coarse cells touch the boundary
+    jag = circ.clone()
+    jag[::3, :] &= (xx[::3, :] < 90)   # notches
+    regj = sampling_region(jag, PointerCfg())
+    fdj = depth(jag)
+    assert regj.any() and float(fdj[regj].min()) >= 2
 
     # thin bar: safe region may be empty at stride 4 -> fallback to the region itself
     bar = torch.zeros(S, S, dtype=torch.bool)
@@ -158,9 +178,9 @@ def main():
         safe = safe_region(owned, cfg)
         region = sampling_region(owned, cfg)
         pts = [q for q in (sample_from(region, g) for _ in range(a.k)) if q is not None]
-        dep = depth(F_pool(owned, cfg.depth_stride)) if owned.any() else torch.zeros(1, 1)
-        dmax = float(dep.max())
-        dpts = [float(dep[y // cfg.depth_stride, x // cfg.depth_stride]) for x, y in pts] or [0.0]
+        fd = depth(owned) if owned.any() else torch.zeros(1, 1)      # full-res depth (px) for reporting
+        dmax = float(fd.max())
+        dpts = [float(fd[y, x]) + 1 for x, y in pts] or [0.0]   # depth 0 = boundary ring -> distance to outside = depth + 1
         img = overlay_masks(base, m[None], labels=[names[idx]], alpha=0.35)
         arr = np.asarray(img).astype(np.float32)
         arr[(m & ~owned).numpy()] *= 0.25                          # owned by a smaller instance: very dark
@@ -172,8 +192,7 @@ def main():
         panels.append(img)
         titles.append(f"{names[idx]}  owned {float(owned.sum()) / float(m.sum()):.0%}  safe {float(safe.sum()) / float(m.sum()):.0%} of mask  alpha {a.alpha}  k={len(pts)}")
         print(f"  {names[idx]:<14} mask {int(m.sum()):>7} px  owned {float(owned.sum()) / float(m.sum()):.0%}  safe {float(safe.sum()) / float(m.sum()):.0%}  "
-              f"max depth {dmax * cfg.depth_stride:.0f} px  sampled depth min/mean {min(dpts) * cfg.depth_stride:.0f}/"
-              f"{np.mean(dpts) * cfg.depth_stride:.0f} px")
+              f"max depth {dmax:.0f} px  pointer distance to outside (full-res) min/mean {min(dpts):.0f}/{np.mean(dpts):.0f} px")
     panel = hstack(panels, titles)
     if a.out:
         os.makedirs(a.out, exist_ok=True)
@@ -183,11 +202,6 @@ def main():
         where = "(window)"
         panel.show(title=f"pointer {img_id}")
     print(f"  -> {where}")
-
-
-def F_pool(m, st):
-    import torch.nn.functional as F
-    return F.avg_pool2d(m[None, None].float(), st)[0, 0] >= 0.5 if st > 1 else m
 
 
 if __name__ == "__main__":

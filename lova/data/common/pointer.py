@@ -1,18 +1,21 @@
 """Step 4: pick ONE pointer target among the candidates and ONE point inside it.
 
-    idx    = pick_target(cands, generator)                 i ~ Uniform(candidates)
     owned  = pointer_region(idx, masks)                    M_i minus pixels owned by a smaller instance
-    safe   = safe_region(owned, cfg)                       {x : D(x) >= alpha * max D},  D = depth to boundary
+    safe   = safe_region(owned, cfg)                       {x : D(x) >= alpha * max D},  D = 0 on the boundary ring
     region = sampling_region(owned, cfg)                   safe if non-empty else owned   (computed ONCE)
     p      = sample_from(region, generator)                p ~ Uniform(region)            (cheap, repeatable)
-    idx, p = make_pointer(transformed, cands, cfg, generator)   tries candidates until one has a region
+    idx, p = make_pointer(transformed, cands, cfg, generator)
+             candidates in random order; the first one with a non-empty owned region is the target
+             (pick_target alone is the plain "one uniform candidate" helper)
 
 Pointer ownership rule (V0, deterministic, used identically at inference):
     owner(x) = argmin_{i : x in M_i} |M_i|      the SMALLEST instance containing the pixel
 A click on a cat lying on a bed means the cat, so bed pointers are never placed on the cat.
 Ownership is resolved against ALL instances (not only candidates): a remote too small to be a
 target still owns its pixels, so a click there is never read as "bed". This says nothing about
-real depth order; it only fixes what an ambiguous click means.
+real depth order; it only fixes what an ambiguous click means. owner_of() applies the same rule
+with GT masks for evaluation / visualisation; the deployed model has no masks and must have
+learned the rule from (I, p) -> R.
 
 Policy (deliberately simple): uniform over eligible instances, uniform over the safe interior.
 No centroid, no bbox centre: the user may click anywhere inside an object, so training pointers
@@ -40,6 +43,7 @@ from .transform import Transformed
 class PointerCfg:
     alpha: float = 0.1        # safe interior: depth >= alpha * max depth of the object
     depth_stride: int = 4     # resolution at which the depth map is computed
+    erode_px: int = 2         # additionally keep >= erode_px + 1 px from the TRUE (full-res) boundary
 
 
 _SHIFTS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
@@ -72,15 +76,27 @@ def distance_to(target: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
 
 
 def depth(mask: torch.Tensor) -> torch.Tensor:
-    """mask [h, w] bool -> [h, w] float: distance from each mask cell to the nearest NON-mask cell
-    (0 outside the mask). The image border counts as inside, as the object may continue beyond it."""
-    d = distance_to(~mask)
+    """mask [h, w] bool -> [h, w] float: how deep a mask cell is. 0 on the outermost ring (cells with
+    a non-mask neighbour), 1 one ring further in, ... (chamfer distance to the outside minus 1).
+    0 outside the mask. The image border counts as inside, as the object may continue beyond it."""
+    d = (distance_to(~mask) - 1.0).clamp(min=0)
     return torch.where(mask, d, torch.zeros_like(d))
+
+
+def erode(mask: torch.Tensor, px: int) -> torch.Tensor:
+    """mask [S, S] bool -> cells farther than `px` (4-neighbour) from any non-mask cell."""
+    m = mask
+    for _ in range(px):
+        inv = (~m)[None, None].float()
+        m = F.max_pool2d(inv, 3, 1, 1)[0, 0] == 0
+    return m
 
 
 def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Tensor:
     """mask [S, S] bool -> [S, S] bool: interior cells with depth >= alpha * max depth.
-    Empty if the mask is empty; may be empty for very thin masks (caller falls back to the mask)."""
+    With alpha > 0 the outermost coarse ring (depth 0) is always excluded, and erode_px removes a
+    full-res margin, so every safe pixel is >= erode_px + 1 px from the true boundary. alpha = 0 and
+    erode_px = 0 keep the whole mask. Empty for thin objects; the caller then falls back to the mask."""
     S = mask.shape[-1]
     st = cfg.depth_stride
     if st > 1:
@@ -90,12 +106,16 @@ def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Ten
     if not small.any():
         return torch.zeros_like(mask)
     d = depth(small)
-    safe_small = small & (d >= cfg.alpha * d.max())
+    dmax = d.max()
+    safe_small = small & (d >= cfg.alpha * dmax) & ((d >= 1) if (cfg.alpha > 0 and dmax >= 1) else small)
     if st > 1:
         safe = F.interpolate(safe_small[None, None].float(), size=(S, S), mode="nearest")[0, 0] > 0.5
     else:
         safe = safe_small
-    return safe & mask
+    safe = safe & mask
+    if cfg.erode_px > 0:  # coarse cells can touch the jagged true boundary: keep a full-res margin
+        safe = safe & erode(mask, cfg.erode_px)
+    return safe
 
 
 def pointer_region(idx: int, masks: torch.Tensor) -> torch.Tensor:
