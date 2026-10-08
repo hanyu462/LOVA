@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lova.data.common.select import SelectCfg, keep_by_ratio, select, visible_ratios  # noqa: E402
 from lova.data.common.transform import TransformCfg, TransformParams, apply, denormalize, transform  # noqa: E402
 from tests.test_transform import synthetic_sample  # noqa: E402
+from tests.common import add_image_args, resolve_image_id  # noqa: E402
 from tests.viz import hstack, overlay_masks  # noqa: E402
 
 
@@ -60,10 +61,7 @@ def unit_test():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default=None)
-    p.add_argument("--split", default="val2017")
-    p.add_argument("--image-id", type=int, default=None)
-    p.add_argument("--index", type=int, default=0)
+    add_image_args(p)
     p.add_argument("--size", type=int, default=640)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval", action="store_true")
@@ -77,7 +75,7 @@ def main():
     from lova.data.coco.load import load, open_coco
 
     cs = open_coco(a.root, a.split)
-    img_id = a.image_id if a.image_id is not None else cs.image_ids()[a.index]
+    img_id = resolve_image_id(cs, a)
     s = load(cs, img_id)
     t = transform(s, TransformCfg(size=a.size, train=not a.eval), torch.Generator().manual_seed(a.seed))
     pr = t.params

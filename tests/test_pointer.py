@@ -24,6 +24,7 @@ from lova.data.common.pointer import (PointerCfg, depth, distance_to, make_point
                                       pick_target, pointer_region, safe_region, sample_pointer)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
+from tests.common import add_image_args, resolve_image_id  # noqa: E402
 from tests.viz import draw_pointer, hstack, overlay_masks  # noqa: E402
 
 
@@ -115,10 +116,7 @@ def unit_test():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default=None)
-    p.add_argument("--split", default="val2017")
-    p.add_argument("--image-id", type=int, default=None)
-    p.add_argument("--index", type=int, default=0)
+    add_image_args(p)
     p.add_argument("--size", type=int, default=640)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval", action="store_true")
@@ -135,7 +133,7 @@ def main():
     from lova.data.coco.load import load, open_coco
 
     cs = open_coco(a.root, a.split)
-    img_id = a.image_id if a.image_id is not None else cs.image_ids()[a.index]
+    img_id = resolve_image_id(cs, a)
     s = load(cs, img_id)
     g = torch.Generator().manual_seed(a.seed)
     t = transform(s, TransformCfg(size=a.size, train=not a.eval), g)

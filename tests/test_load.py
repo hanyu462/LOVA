@@ -24,6 +24,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lova.data.coco.load import CocoSet, load, open_coco  # noqa: E402
+from tests.common import add_image_args, resolve_image_id  # noqa: E402
 from tests.viz import overlay_masks  # noqa: E402
 
 
@@ -97,11 +98,8 @@ def check_real(cs: CocoSet, img_id: int):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default=None)
-    p.add_argument("--split", default="val2017")
-    p.add_argument("--n", type=int, default=4)
-    p.add_argument("--image-id", type=int, default=None, help="COCO image id (ids are sparse, not 0..N)")
-    p.add_argument("--index", type=int, default=None, help="k-th image of the split in sorted id order")
+    add_image_args(p)
+    p.add_argument("--n", type=int, default=4, help="random images when neither --image-id nor --index is given")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default=None, help="save PNGs here instead of opening a window")
     a = p.parse_args()
@@ -110,17 +108,10 @@ def main():
     if a.root is None:
         return
     cs = open_coco(a.root, a.split)
-    all_ids = cs.image_ids()
-    if a.image_id is not None:
-        if a.image_id not in cs.coco.imgs:
-            near = [i for i in all_ids if abs(i - a.image_id) < 500][:6]
-            sys.exit(f"image id {a.image_id} is not in {a.split} (COCO ids are sparse). Nearby valid ids: {near}. "
-                     f"Or use --index k for the k-th image.")
-        ids = [a.image_id]
-    elif a.index is not None:
-        ids = [all_ids[a.index]]
+    if a.image_id is not None or a.index:
+        ids = [resolve_image_id(cs, a)]
     else:
-        ids = [int(i) for i in np.random.RandomState(a.seed).choice(all_ids, a.n, replace=False)]
+        ids = [int(i) for i in np.random.RandomState(a.seed).choice(cs.image_ids(), a.n, replace=False)]
     if a.out:
         os.makedirs(a.out, exist_ok=True)
     for img_id in ids:
