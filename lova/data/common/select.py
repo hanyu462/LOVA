@@ -3,7 +3,7 @@
     ratio_i = |mask_i ∧ valid| / |valid|       visible instance area over visible image area
     keep    = { i : ratio_i >= threshold }     largest first
 
-    cands = select(transformed, threshold)     -> list[int] of indices into transformed.masks
+    cands = select(transformed, SelectCfg(threshold=0.01))   -> list[int] indices into transformed.masks
 
 Decided after the transform on purpose: a random crop can shrink a large object to a sliver or
 enlarge a small one, so the original-image ratio is not the right quantity. Everything else is
@@ -14,9 +14,18 @@ Only keep_by_ratio holds the rule, so the same policy can be reused on other rat
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from .transform import Transformed
+
+
+@dataclass(frozen=True)
+class SelectCfg:
+    threshold: float = 0.01   # visible-area ratio a pointer target must reach. Working value, not
+                              # final: val2017 at 0.01 -> 93 % of images have a candidate, 42 % of
+                              # instances qualify (person-sized objects stay, bats / clocks drop)
 
 
 def visible_ratios(masks: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -34,6 +43,6 @@ def keep_by_ratio(ratios: torch.Tensor, threshold: float) -> list[int]:
     return idx[r[idx].argsort(descending=True)].tolist()
 
 
-def select(t: Transformed, threshold: float) -> list[int]:
+def select(t: Transformed, cfg: SelectCfg = SelectCfg()) -> list[int]:
     """Pointer candidates of a transformed sample (indices into t.masks), largest first."""
-    return keep_by_ratio(visible_ratios(t.masks, t.valid), threshold)
+    return keep_by_ratio(visible_ratios(t.masks, t.valid), cfg.threshold)

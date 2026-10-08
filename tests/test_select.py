@@ -19,7 +19,7 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lova.data.common.select import keep_by_ratio, select, visible_ratios  # noqa: E402
+from lova.data.common.select import SelectCfg, keep_by_ratio, select, visible_ratios  # noqa: E402
 from lova.data.common.transform import TransformCfg, TransformParams, apply, denormalize, transform  # noqa: E402
 from tests.test_transform import synthetic_sample  # noqa: E402
 from tests.viz import hstack, overlay_masks  # noqa: E402
@@ -53,7 +53,8 @@ def unit_test():
     crop = apply(s, TransformParams(scale=1.6, new_h=480, new_w=640, flip=False, crop_x=200, crop_y=224), cfg)
     r_crop = visible_ratios(crop.masks, crop.valid)
     assert r_crop[0] == 0 and r_crop[2] > 0                                   # square gone, bar visible
-    assert 0 not in select(crop, 0.001) and select(crop, 0.5) == []
+    assert 0 not in select(crop, SelectCfg(0.001)) and select(crop, SelectCfg(0.5)) == []
+    assert select(full) == select(full, SelectCfg(0.01)), "default cfg"
     print("select unit test OK")
 
 
@@ -94,7 +95,7 @@ def main():
     img = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
     panels, titles = [], []
     for x in ths:
-        cands = select(t, x)
+        cands = select(t, SelectCfg(threshold=x))
         labels = [f"{names[i]} {float(ratios[i]):.3f}" if i in cands else "" for i in range(len(t))]
         panels.append(overlay_masks(img, t.masks, filled=cands, labels=labels))
         titles.append(f"threshold {x}: {len(cands)}/{len(t)} candidates")
