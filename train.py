@@ -52,8 +52,18 @@ def get_args(argv=None):
     p.add_argument("--save-every", type=int, default=5000)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     # model
-    p.add_argument("--gate-mode", choices=["depth", "linear", "none"], default="depth")
+    p.add_argument("--gate-mode", choices=["depth", "binary", "linear", "none"], default="depth",
+                   help="depth = continuous block-depth gating (original V0); binary = one shared threshold "
+                        "(sigmoid relaxation of G = 1[R>0.5]); V1 hard routing uses the same thresholds")
     p.add_argument("--gate-temp", type=float, default=0.1)
+    p.add_argument("--gate-temp-final", type=float, default=None,
+                   help="phase C: anneal gate temperature linearly from --gate-temp to this value "
+                        "(sharper gate -> smaller gap to V1 hard routing)")
+    p.add_argument("--r-sampler", choices=["continuous", "binary"], default=None,
+                   help="phase A R-field sampler. default: binary if --gate-mode binary else continuous")
+    p.add_argument("--budget-on", choices=["r", "gate"], default=None,
+                   help="budget loss on mean(R) or on mean(g(R)) (soft execution map). "
+                        "default: gate if --gate-mode binary else r")
     p.add_argument("--transition", choices=["conv", "light"], default="conv",
                    help="stage transition (always-on base path). light = avgpool + 1x1")
     # phase A
@@ -75,6 +85,10 @@ def get_args(argv=None):
         a.lr = {"A": 1e-3, "B": 1e-3, "C": 2e-4}[a.phase]
     if a.w_task is None:
         a.w_task = 0.0 if a.phase == "B" else 1.0
+    if a.r_sampler is None:
+        a.r_sampler = "binary" if a.gate_mode == "binary" else "continuous"
+    if a.budget_on is None:
+        a.budget_on = "gate" if a.gate_mode == "binary" else "r"
     return a
 
 
@@ -112,11 +126,13 @@ def compute_loss(model, batch, a, progress):
     """progress in [0,1] (used for R-sup decay in phase C)."""
     m = model.module if hasattr(model, "module") else model
     losses, logs = {}, {}
+    if a.phase == "C" and a.gate_temp_final is not None:
+        m.backbone.gate_temp = a.gate_temp + (a.gate_temp_final - a.gate_temp) * progress
     if a.phase == "A":
         if a.r_fixed is not None:
             r = torch.full_like(batch["pointed_mask4"], a.r_fixed)
         else:
-            r = sample_r(batch["pointed_mask4"])
+            r = sample_r(batch["pointed_mask4"], kind=a.r_sampler)
         out = model(batch["image"], batch["pointer"], r_override=r)
     elif a.phase == "B" and a.w_task == 0:
         r = model(batch["image"], batch["pointer"], r_only=True)["r"]
@@ -131,10 +147,18 @@ def compute_loss(model, batch, a, progress):
 
     if a.phase in ("B", "C"):
         decay = 1.0 if a.phase == "B" else 1.0 - (1.0 - a.r_sup_floor) * progress
+        exec_map = None
+        if a.budget_on == "gate":
+            tau = 0.5 if a.gate_mode == "binary" else m.backbone.stages[0].blocks[0].tau
+            exec_map = torch.sigmoid((r.float() - tau) / m.backbone.gate_temp)
         losses.update(r_losses(r, batch["pointed_mask4"], batch["valid4"],
-                               a.w_r_in * decay, a.w_r_out * decay, a.w_budget, a.budget_extra))
+                               a.w_r_in * decay, a.w_r_out * decay, a.w_budget, a.budget_extra, exec_map=exec_map))
     logs.update(r_stats(r.detach(), batch["pointed_mask4"], batch["valid4"]))
+    with torch.no_grad():
+        logs["g_mean"] = m.backbone.soft_execution(r.detach().float()).mean().item()
     logs["vcompute"] = m.backbone.virtual_compute(r.detach(), batch["valid4"]).mean().item()
+    if a.phase == "C" and a.gate_temp_final is not None:
+        logs["T"] = m.backbone.gate_temp
     return losses, logs
 
 

@@ -159,8 +159,9 @@ def main():
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--device", default=None)
+    p.add_argument("--gate-mode", default=None, help="override gate: depth | binary | hard | linear | none")
     a = p.parse_args()
-    state = State(Predictor(a.ckpt, a.device), a.images_dir)
+    state = State(Predictor(a.ckpt, a.device, gate_mode=a.gate_mode), a.images_dir)
     srv = ThreadingHTTPServer((a.host, a.port), make_handler(state))
     print(f"model on {state.pred.device}, {len(state.files)} sample images. open http://localhost:{a.port}  (Ctrl+C to stop)")
     try:

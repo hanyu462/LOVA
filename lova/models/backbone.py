@@ -6,15 +6,21 @@ Interface contract (keep this stable so V1/V2 can swap the implementation):
     backbone:  (F0, R [B,1,H/4,W/4])          -> {"s4","s8","s16","s32"} features
                plus backbone.last_gates: list of per-block gate maps (for logging)
 
-V0 conditioning = soft depth gating of residual blocks:
+V0 conditioning = gated residual blocks:
 
-    F_{l+1} = F_l + g_l(R) * Block_l(F_l),   g_l(R) = sigmoid((R - tau_l) / T)
+    F_{l+1} = F_l + g_l(R) * Block_l(F_l)
 
-Within a stage the thresholds tau_l increase, so R acts as a continuous
-"how many refinement blocks run here" knob: R=0 -> (almost) identity only,
-R=1 -> every block. This is MASKING in V0 (all blocks are computed
-everywhere). In V1 the same thresholds become hard tile-level skip
-decisions, which is where real FLOPs savings come from.
+gate modes (R is always a continuous importance field in [0,1]):
+    depth  : g_l = sigmoid((R - tau_l) / T), tau_l increasing within a stage
+             -> continuous "how many refinement blocks run here" knob (original V0)
+    binary : g_l = sigmoid((R - 0.5) / T), one shared threshold per stage
+             -> binary-TARGETED soft gate: a sigmoid relaxation (for gradients) of the
+                execution map G = 1[R > 0.5]. All refinement blocks switch together.
+    hard   : g_l = 1[R > tau_l]  (no gradient; eval only -> measures the train/inference gap)
+    linear : g_l = R;   none : g_l = 1 (R ignored)
+
+Everything here is MASKING: all blocks are computed everywhere and multiplied by g.
+In V1 the hard execution map becomes tile-level skipping (real FLOPs savings).
 """
 from __future__ import annotations
 
@@ -55,6 +61,10 @@ class GatedResBlock(nn.Module):
     def gate(self, r: torch.Tensor, mode: str, temp: float) -> torch.Tensor:
         if mode == "depth":
             return torch.sigmoid((r - self.tau) / temp)
+        if mode == "binary":
+            return torch.sigmoid((r - self.tau) / temp)
+        if mode == "hard":
+            return (r > self.tau).to(r.dtype)
         if mode == "linear":
             return r
         if mode == "none":
@@ -67,7 +77,8 @@ class GatedResBlock(nn.Module):
 
 
 class RAStage(nn.Module):
-    def __init__(self, cin: int, cout: int, depth: int, stride: int, transition: str = "conv"):
+    def __init__(self, cin: int, cout: int, depth: int, stride: int, transition: str = "conv",
+                 shared_tau: float | None = None):
         super().__init__()
         # Transition = part of the always-on base path (not gated). Its strength bounds how
         # good low-R perception can be: "light" (avgpool + 1x1) makes R matter more.
@@ -79,7 +90,7 @@ class RAStage(nn.Module):
             self.trans = nn.Sequential(nn.AvgPool2d(stride) if stride > 1 else nn.Identity(), PreActConv(cin, cout, k=1))
         else:
             raise ValueError(transition)
-        taus = [(i + 0.5) / depth for i in range(depth)]
+        taus = [shared_tau] * depth if shared_tau is not None else [(i + 0.5) / depth for i in range(depth)]
         self.blocks = nn.ModuleList(GatedResBlock(cout, t) for t in taus)
 
     def forward(self, x, r, mode, temp):
@@ -101,8 +112,9 @@ class RABackbone(nn.Module):
         self.gate_mode = gate_mode
         self.gate_temp = gate_temp
         stages, cin = [], c0
+        shared_tau = 0.5 if gate_mode == "binary" else None
         for i, (w, d) in enumerate(zip(widths, depths)):
-            stages.append(RAStage(cin, w, d, stride=1 if i == 0 else 2, transition=transition))
+            stages.append(RAStage(cin, w, d, stride=1 if i == 0 else 2, transition=transition, shared_tau=shared_tau))
             cin = w
         self.stages = nn.ModuleList(stages)
         self.last_gates = []
@@ -116,6 +128,20 @@ class RABackbone(nn.Module):
             feats[f"s{4 * 2**i}"] = x
             self.last_gates.append(gates)
         return feats
+
+    def soft_execution(self, r: torch.Tensor) -> torch.Tensor:
+        """Differentiable FLOPs-weighted mean gate, per image [B]: the soft version of
+        virtual_compute (same weighting), usable as a budget target in training."""
+        total, used = 0.0, 0.0
+        for i, stage in enumerate(self.stages):
+            r_s = r if i == 0 else F.avg_pool2d(r, 2**i)
+            c = self.widths[i]
+            w = 2 * 9 * c * c * r_s.shape[2] * r_s.shape[3]
+            for blk in stage.blocks:
+                mode = "binary" if self.gate_mode == "hard" else self.gate_mode
+                used = used + blk.gate(r_s, mode, self.gate_temp).flatten(1).mean(1) * w
+                total += w
+        return used / total
 
     @torch.no_grad()
     def virtual_compute(self, r: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:

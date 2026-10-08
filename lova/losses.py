@@ -48,8 +48,12 @@ def instance_loss(out, batch, w_heat=1.0, w_mask=3.0):
     return {"heat": w_heat * l_heat, "mask": w_mask * l_mask}
 
 
-def r_losses(r, pointed_mask4, valid4, w_in=1.0, w_out=0.1, w_budget=1.0, budget_extra=0.15, margin=2):
-    """r, pointed_mask4, valid4: [B,1,h,w]."""
+def r_losses(r, pointed_mask4, valid4, w_in=1.0, w_out=0.1, w_budget=1.0, budget_extra=0.15, margin=2,
+             exec_map=None):
+    """r, pointed_mask4, valid4: [B,1,h,w].
+    exec_map: optional soft execution map g(R) [B,1,h,w]. If given, the budget is applied to
+    mean(g) (what actually decides compute under binary routing) instead of mean(R); this also
+    stops the degenerate "R = tau - eps everywhere" solution that a mean(R) budget would allow."""
     r = r.float().clamp(1e-4, 1 - 1e-4)
     m = pointed_mask4
     l_in = -(m * torch.log(r)).sum() / m.sum().clamp(min=1)
@@ -57,7 +61,8 @@ def r_losses(r, pointed_mask4, valid4, w_in=1.0, w_out=0.1, w_budget=1.0, budget
     w = (1 - near) * valid4
     l_out = -(w * torch.log(1 - r)).sum() / w.sum().clamp(min=1)
     vsum = valid4.flatten(1).sum(1).clamp(min=1)
-    frac = (r * valid4).flatten(1).sum(1) / vsum
+    usage = r if exec_map is None else exec_map.float()
+    frac = (usage * valid4).flatten(1).sum(1) / vsum
     target = ((m * valid4).flatten(1).sum(1) / vsum + budget_extra).clamp(max=1)
     l_budget = F.relu(frac - target).pow(2).mean()
     return {"r_in": w_in * l_in, "r_out": w_out * l_out, "r_budget": w_budget * l_budget}

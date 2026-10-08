@@ -64,11 +64,14 @@ def make_r_override(mode: str, shape, device):
 class Predictor:
     """Load once, call many times: predictor(pil_image, (x, y)) -> dict."""
 
-    def __init__(self, ckpt_path: str, device: str | None = None, amp: bool = True):
+    def __init__(self, ckpt_path: str, device: str | None = None, amp: bool = True, gate_mode: str | None = None):
         ckpt = torch.load(ckpt_path, map_location="cpu")
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = LOVAv0(**ckpt["config"]).to(self.device).eval()
         self.model.load_state_dict(ckpt["model"])
+        if gate_mode:
+            self.model.backbone.gate_mode = gate_mode  # e.g. "hard": 1[R > tau], thresholds as trained
+        self.gate_mode = self.model.backbone.gate_mode
         self.size = ckpt.get("args", {}).get("img_size", 512)
         self.num_classes = ckpt["config"]["num_classes"]
         self.class_names = COCO_CLASSES if self.num_classes == len(COCO_CLASSES) else [f"cls{k}" for k in range(self.num_classes)]
@@ -206,17 +209,18 @@ def main():
     p.add_argument("--det-thr", type=float, default=0.3)
     p.add_argument("--out", default="infer_out.png")
     p.add_argument("--device", default=None)
+    p.add_argument("--gate-mode", default=None, help="override gate: depth | binary | hard | linear | none")
     p.add_argument("--repeat", type=int, default=1, help="extra timed runs for a stable latency number")
     a = p.parse_args()
 
-    pred = Predictor(a.ckpt, a.device)
+    pred = Predictor(a.ckpt, a.device, gate_mode=a.gate_mode)
     img = Image.open(a.image)
     xy = tuple(float(v) for v in a.pointer.split(","))
     res = pred(img, xy, a.r_mode)
     lat = [res["latency_ms"]] + [pred(img, xy, a.r_mode)["latency_ms"] for _ in range(a.repeat - 1)]
     render_panel(img, res, pred.class_names, a.det_thr, xy).save(a.out)
 
-    print(f"pointer (orig px) = {xy}   r_mode = {a.r_mode}   device = {pred.device}")
+    print(f"pointer (orig px) = {xy}   r_mode = {a.r_mode}   gate_mode = {pred.gate_mode}   device = {pred.device}")
     print(f"R mean = {res['r_mean']:.3f}   vcompute = {res['vcompute']:.3f}   latency = {np.median(lat):.1f} ms (median of {len(lat)})")
     rows = pred.detections(res, a.det_thr)
     print(f"{len(rows)} detections (score >= {a.det_thr}):")

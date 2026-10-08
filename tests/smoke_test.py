@@ -50,6 +50,21 @@ def test_shapes_and_grads():
     assert len(res) == B
     print("shapes/grad OK; vcompute(R=pred) =", model.backbone.virtual_compute(out["r"].detach()).tolist())
 
+    # binary gate: shared tau, hard mode is exactly 1[R > 0.5], soft_execution differentiable
+    mb = LOVAv0(ds.num_classes, gate_mode="binary")
+    assert all(blk.tau == 0.5 for st in mb.backbone.stages for blk in st.blocks)
+    r = torch.rand(2, 1, 32, 32)
+    mb.backbone.gate_mode = "hard"
+    g = mb.backbone.stages[0].blocks[0].gate(r, "hard", 0.1)
+    assert torch.equal(g, (r > 0.5).float())
+    mb.backbone.gate_mode = "binary"
+    rr = r.clone().requires_grad_(True)
+    mb.backbone.soft_execution(rr).sum().backward()
+    assert rr.grad is not None and rr.grad.abs().sum() > 0
+    from lova.rsampler import sample_r
+    rb = sample_r(batch["pointed_mask4"], kind="binary")
+    assert set(rb.unique().tolist()) <= {0.0, 1.0}, "binary sampler must produce {0,1}"
+
 
 def test_phases_and_eval():
     with tempfile.TemporaryDirectory() as d:
@@ -62,10 +77,16 @@ def test_phases_and_eval():
         run("--phase", "B", "--init", f"{d}/A/last.pth", "--out", f"{d}/B")
         run("--phase", "B", "--w-task", "0.5", "--init", f"{d}/A/last.pth", "--out", f"{d}/B2")
         run("--phase", "C", "--init", f"{d}/B/last.pth", "--out", f"{d}/C")
+        # binary-execution variant: {0,1} sampler, shared tau, budget on mean(g), T annealing in C
+        run("--phase", "A", "--gate-mode", "binary", "--out", f"{d}/Ab")
+        run("--phase", "C", "--gate-mode", "binary", "--gate-temp-final", "0.05", "--init", f"{d}/Ab/last.pth",
+            "--out", f"{d}/Cb")
         ev = [sys.executable, os.path.join(ROOT, "eval_pointer.py"), "--ckpt", f"{d}/C/last.pth", "--data",
               "synthetic", "--max-images", "6", "--bs", "4", "--device", "cpu", "--viz", "2"]
         subprocess.run(ev + ["--out", f"{d}/ev"], check=True, cwd=ROOT)
         subprocess.run(ev + ["--out", f"{d}/ev_sweep", "--sweep", "3", "--r-mode", "oracle"], check=True, cwd=ROOT)
+        subprocess.run(ev[:2] + ["--ckpt", f"{d}/Cb/last.pth"] + ev[4:] + ["--out", f"{d}/ev_hard", "--gate-mode", "hard"],
+                       check=True, cwd=ROOT)
         assert os.path.exists(f"{d}/ev/viz_0000.png")
     print("phases + eval OK")
 

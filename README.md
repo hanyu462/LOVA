@@ -34,6 +34,18 @@ python eval_pointer.py --ckpt runs/C/last.pth --coco-root $COCO --viz 20 --out e
 python eval_pointer.py --ckpt runs/C/last.pth --coco-root $COCO --sweep 4 --max-images 1000 --out eval/C_sweep
 ```
 
+## Binary-execution variant (V0.1, see docs §8b)
+
+R stays a continuous importance field; only the execution is binary (`G = 1[R > 0.5]`, sigmoid-relaxed in training).
+
+```bash
+torchrun --nproc_per_node 4 train.py --phase A --gate-mode binary --coco-root $COCO --epochs 24 --bs 32 --amp --out runs/Ab
+python eval_pointer.py --ckpt runs/Ab/last.pth --coco-root $COCO --r-mode zeros --out eval/Ab_r0
+python eval_pointer.py --ckpt runs/Ab/last.pth --coco-root $COCO --r-mode ones --gate-mode hard --out eval/Ab_r1_hard
+```
+
+`--gate-mode binary` implies `--r-sampler binary` and `--budget-on gate`; `--gate-temp-final 0.05` anneals T in phase C.
+
 ## Inference with your own pointer
 
 ```bash

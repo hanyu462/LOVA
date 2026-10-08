@@ -264,6 +264,60 @@ GT instance마다 아래 값을 기록한다(→ `instances.csv`).
 
 ---
 
+## 8b. V0.1 — continuous R + binary execution (Phase A 결과 후 추가, 2026-10-08)
+
+### 관찰
+
+COCO Phase A(depth gating, continuous sampler) 10k step 체크포인트에서 R을 외부 주입해 보면
+R=0 → R=0.25에서는 뚜렷한 차이(작은 물체 소실, score 하락)가 있으나 **R=0.25 이상은 평평**하다.
+학습 로그에서도 중간 R 구간(배치 평균 0.33~0.55)과 loss의 상관이 0이다.
+τ 스케줄상 R=0.25에서는 각 stage의 첫 블록이 절반 세기(g=0.5)로만 켜지고 뒤쪽 블록은 g≤0.08이므로,
+"첫 블록 절반만으로 R=1 품질이 나온다" = 뒤쪽 refinement 블록의 capacity가 실질적으로 쓰이지 않는다.
+이유는 §1의 설계 자체에 있다: 모든 GT가 R과 무관하게 positive이므로 네트워크는 R에 둔감해지는 쪽이
+loss를 가장 줄이며, 샘플러가 앞쪽 블록을 더 자주 켜 주어 능력이 거기에 몰린다.
+E2 다섯 점 AP로 확정한다.
+
+### 결정: R의 표현과 실행 routing을 분리한다
+
+```
+R_θ(I,p) ∈ [0,1]^{H×W}      continuous importance / refinement priority   (그대로 유지)
+G = 1[R > τ]                 binary execution map, τ = 0.5, stage 내 블록 공유
+F_{l+1} = F_l + G · Body_l(F_l)
+학습:  G ≈ sigmoid((R − τ)/T)   (relaxation. V0는 여전히 masking)
+V1 :  G = 1[R > τ] hard, STE
+```
+
+- compute 손잡이는 "R의 크기"가 아니라 **R > τ인 면적**이 된다. budget loss도 mean(R) 대신
+  mean(g(R))에 건다(`--budget-on gate`). "R = τ − ε everywhere" 같은 퇴화 해법을 막는다.
+- Phase A 샘플러는 {0,1}만 쓴다(`--r-sampler binary`): const ∈ {0,1}, oracle = pointed mask 팽창(반경 0~8),
+  noise = 임계 처리한 이진 패치. backbone이 두 operating point를 확실히 배우게 한다.
+  **R predictor(B/C)는 계속 연속**이고 0/1 GT로 당기지 않는다. 값의 크기는 task loss + budget이 정한다.
+- Phase C에서 T를 서서히 낮출 수 있다(`--gate-temp-final`). hard routing과의 train/inference 격차를 줄인다.
+- 평가 시 `--gate-mode hard`로 1[R>τ] 실행을 미리 재서 격차를 측정한다.
+
+### 용어
+
+V0에서 soft gating인 한 mask 면적을 줄여도 FLOPs는 줄지 않는다. 따라서 V0의 곡선은
+**mean(g) ↔ AP** (active-area proxy)라고 부른다. **FLOPs ↔ AP**는 V1 hard routing 구현 후에만 주장한다.
+또한 Phase A 체크포인트는 A0가 아니다. A0는 R≡1로만 학습한 별도 baseline이며 E3가 둘의 차이를 잰다.
+
+### V0.1 성공 기준
+
+```
+AP(A, R=1) ≈ AP(A0)          (refinement 블록이 실제로 쓰임, 손실 1~2 AP 이내)
+AP(A, R=0) < AP(A, R=1)      (차이가 충분히 클 것. 예: 13 vs 19.5)
+AP(A, hard) ≈ AP(A, soft)    (train/inference 격차 작음)
+```
+
+```bash
+torchrun --nproc_per_node 4 train.py --phase A --gate-mode binary --coco-root $COCO --epochs 24 --bs 32 --amp --out runs/Ab
+python eval_pointer.py --ckpt runs/Ab/last.pth --coco-root $COCO --r-mode zeros --out eval/Ab_r0
+python eval_pointer.py --ckpt runs/Ab/last.pth --coco-root $COCO --r-mode ones  --out eval/Ab_r1
+python eval_pointer.py --ckpt runs/Ab/last.pth --coco-root $COCO --r-mode ones --gate-mode hard --out eval/Ab_r1_hard
+```
+
+---
+
 ## 9. V1 / V2 확장
 
 ### V1 — 실제 연산 절감 (같은 R semantics 유지)

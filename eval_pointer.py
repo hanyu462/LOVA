@@ -11,6 +11,8 @@ plus (COCO, single-pointer mode) mask AP overall and per bin.
 --sweep K   : up to K pointers per image, each on a different instance.
               Reports the "pointer gain": same instance, pointed vs not pointed.
 --r-mode    : pred | ones | zeros | oracle | const:<v>   (ablations / controls)
+--gate-mode : override the gate at eval time, e.g. "hard" = 1[R > tau] with the thresholds the
+              checkpoint was trained with -> measures the soft-train / hard-exec gap (V1 preview)
 
 Example:
   python eval_pointer.py --ckpt runs/C/last.pth --coco-root /data/coco --out eval/C_pred
@@ -46,6 +48,8 @@ def get_args():
     p.add_argument("--coco-root", default="data/coco")
     p.add_argument("--img-size", type=int, default=None)
     p.add_argument("--r-mode", default="pred")
+    p.add_argument("--gate-mode", default=None, choices=["depth", "binary", "hard", "linear", "none"],
+                   help="override gate mode at eval (thresholds stay as trained)")
     p.add_argument("--sweep", type=int, default=0)
     p.add_argument("--max-images", type=int, default=0)
     p.add_argument("--bs", type=int, default=8)
@@ -209,6 +213,8 @@ def main():
     img_size = a.img_size or train_args.get("img_size", 512)
     model = LOVAv0(**ckpt["config"]).to(dev).eval()
     model.load_state_dict(ckpt["model"])
+    if a.gate_mode:
+        model.backbone.gate_mode = a.gate_mode  # thresholds (tau) stay as trained
 
     if a.data == "synthetic":
         from lova.data.synthetic import SyntheticPointerDataset
@@ -269,7 +275,7 @@ def main():
         wr.writeheader()
         wr.writerows(rows)
 
-    summary = {"r_mode": a.r_mode, "n_instances": len(rows),
+    summary = {"r_mode": a.r_mode, "gate_mode": model.backbone.gate_mode, "n_instances": len(rows),
                "by_R": bin_summary(rows, "mean_r", R_BINS), "by_dist": bin_summary(rows, "dist", D_BINS),
                "pointed": bin_summary([r for r in rows if r["pointed"]], "mean_r", [0, 1.0001]),
                "not_pointed": bin_summary([r for r in rows if not r["pointed"]], "mean_r", [0, 1.0001])}
