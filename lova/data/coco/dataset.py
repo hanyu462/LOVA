@@ -11,7 +11,9 @@ instances), 58 samples/s with 8 workers; 12 workers were slower (contention).
 
 Images without a non-crowd instance are dropped at construction. If build() returns None for an
 index (no pointer candidate after the transform), the next index is tried; a sample is never
-silently empty. In eval mode (train=False) the transform is deterministic and the pointer draw is
+silently empty. TODO before evaluation: in eval mode the retry must not substitute another image
+(index 10 -> image 11 would evaluate image 11 twice and drop image 10); precompute the set of
+pointer-able indices deterministically instead. In eval mode (train=False) the transform is deterministic and the pointer draw is
 seeded by the index, so every evaluation sees the same (image, pointer) pairs.
 """
 from __future__ import annotations

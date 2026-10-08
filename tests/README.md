@@ -1,4 +1,4 @@
-Tests mirror the package: `tests/coco/` for `lova/data/coco`, `tests/common/` for `lova/data/common`, `tests/utils/` for `lova/utils`.
+Tests mirror the package: `tests/coco/` for `lova/data/coco`, `tests/common/` for `lova/data/common`, `tests/utils/` for `lova/utils`, `tests/losses/` for `lova/losses`.
 One script per module. Each imports the module and (1) asserts on a small synthetic case,
 (2) optionally renders on real data (`--root datasets/coco`) for visual checking: a window by
 default, PNGs with `--out`. Never re-implements module logic. `tests/util/` holds shared helpers
