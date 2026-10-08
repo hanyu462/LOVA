@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from ...utils.geometry import depth, erode, owner_map  # grid primitives live in lova/utils/geometry.py; this file is policy only
+from ...utils.geometry import depth_l1, erode, owner_map  # grid primitives live in lova/utils/geometry.py; this file is policy only
 from .transform import Transformed
 
 
@@ -60,7 +60,7 @@ def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Ten
         small = mask
     if not small.any():
         return torch.zeros_like(mask)
-    d = depth(small)
+    d = depth_l1(small)                                   # Manhattan depth: exact, separable, no per-ring loop
     dmax = d.max()
     if not torch.isfinite(dmax):
         # no outside cell at all in the coarse mask: the canvas border is not a boundary by
@@ -131,13 +131,15 @@ def sample_pointer(region: torch.Tensor, cfg: PointerCfg = PointerCfg(),
 
 
 def make_pointer(t: Transformed, cands: list[int], cfg: PointerCfg = PointerCfg(),
-                 generator: torch.Generator | None = None) -> tuple[int, tuple[int, int]] | None:
+                 generator: torch.Generator | None = None, owners: torch.Tensor | None = None) -> tuple[int, tuple[int, int]] | None:
     """(pointed instance index, (x, y)) for one transformed sample. Candidates are tried in random
     order; one whose owned region is empty (fully covered by smaller instances) is skipped.
-    None if no candidate has an owned pixel."""
+    None if no candidate has an owned pixel. `owners` = owner_map(t.masks) if already computed."""
+    if owners is None:
+        owners = owner_map(t.masks)
     order = [cands[i] for i in torch.randperm(len(cands), generator=generator).tolist()]
     for idx in order:
-        p = sample_pointer(pointer_region(idx, t.masks), cfg, generator)
+        p = sample_pointer(pointer_region(idx, t.masks, owners), cfg, generator)
         if p is not None:
             return idx, p
     return None

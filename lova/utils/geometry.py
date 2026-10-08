@@ -105,18 +105,18 @@ def depth_chebyshev(mask: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
 
 def distance_l1(target: torch.Tensor) -> torch.Tensor:
     """target [..., h, w] bool -> [..., h, w] float: exact Manhattan (L1) distance to the nearest TRUE
-    cell, +inf if none. Separable: a forward + backward scan along x, then along y (min-plus with
-    unit cost), i.e. 4 * (h + w) vector ops for a whole batch instead of one pass per ring."""
+    cell, +inf if none. Separable min-plus with unit cost, each 1-D pass done with two cummin
+    calls (no Python loop), for a whole batch at once."""
     inf = float("inf")
     d = torch.where(target, torch.zeros_like(target, dtype=torch.float32), torch.full_like(target, inf, dtype=torch.float32))
     for axis in (-1, -2):
         n = d.shape[axis]
         d = d.movedim(axis, -1)
-        for x in range(1, n):
-            d[..., x] = torch.minimum(d[..., x], d[..., x - 1] + 1)
-        for x in range(n - 2, -1, -1):
-            d[..., x] = torch.minimum(d[..., x], d[..., x + 1] + 1)
-        d = d.movedim(-1, axis)
+        idx = torch.arange(n, device=d.device, dtype=d.dtype)
+        # min_{j <= x} (d[j] + x - j) = x + cummin(d - j);  min_{j >= x} (d[j] + j - x) = cummin from the right
+        fwd = torch.cummin(d - idx, dim=-1).values + idx
+        bwd = torch.cummin((d + idx).flip(-1), dim=-1).values.flip(-1) - idx
+        d = torch.minimum(fwd, bwd).movedim(-1, axis)
     return d
 
 
@@ -149,7 +149,7 @@ def owner_map(masks: torch.Tensor) -> torch.Tensor:
     areas = masks.flatten(1).sum(1)
     order = sorted(range(n), key=lambda i: (-int(areas[i]), -i))   # largest first; equal area: higher index first
     for i in order:                                                  # ... so the lower index paints last and wins
-        owner[masks[i]] = i
+        owner[masks[i]] = i                                          # (N masked assignments beat an N x S^2 argmax copy)
     return owner
 
 

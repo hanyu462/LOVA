@@ -137,13 +137,24 @@ def radial_profile(mask_s: torch.Tensor, p_s: tuple[float, float], cfg: RgtCfg =
     return torch.exp(-((dist / sigma) ** cfg.gamma))
 
 
-def soft_mask(mask_s: torch.Tensor, band_cells: float) -> torch.Tensor:
-    """S: exactly 1 on the mask, linear ramp 1 -> 0 over `band_cells` outside it, 0 beyond."""
+def soft_mask(mask_s: torch.Tensor, band_cells: float, coarse: int = 2) -> torch.Tensor:
+    """S: exactly 1 on the mask, linear ramp 1 -> 0 over `band_cells` outside it, 0 beyond.
+    The distance is propagated on a `coarse`x coarser grid (the ramp is ~100 px wide, so coarse
+    cells lose nothing visible) and interpolated back; the mask itself is re-imposed exactly."""
     if band_cells <= 0:
         return mask_s.float()
-    d = distance_to(mask_s, max_iter=int(math.ceil(band_cells)) + 1)   # cells to the mask (0 on it)
-    d = torch.where(torch.isfinite(d), d, torch.full_like(d, band_cells + 1))
-    return (1.0 - (d - 0.5).clamp(min=0) / band_cells).clamp(0, 1)
+    h, w = mask_s.shape
+    if coarse > 1 and h % coarse == 0 and w % coarse == 0:
+        mc = F.avg_pool2d(mask_s[None, None].float(), coarse)[0, 0] > 0
+        d = distance_to(mc, max_iter=int(math.ceil(band_cells / coarse)) + 1) * coarse
+        d = torch.where(torch.isfinite(d), d, torch.full_like(d, band_cells + 1))
+        ramp = (1.0 - (d - 0.5).clamp(min=0) / band_cells).clamp(0, 1)
+        ramp = F.interpolate(ramp[None, None], size=(h, w), mode="bilinear", align_corners=False)[0, 0]
+    else:
+        d = distance_to(mask_s, max_iter=int(math.ceil(band_cells)) + 1)
+        d = torch.where(torch.isfinite(d), d, torch.full_like(d, band_cells + 1))
+        ramp = (1.0 - (d - 0.5).clamp(min=0) / band_cells).clamp(0, 1)
+    return torch.where(mask_s, torch.ones_like(ramp), ramp)
 
 
 def make_r_gt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:

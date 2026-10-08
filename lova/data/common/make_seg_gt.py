@@ -76,9 +76,24 @@ class SegGT:
     center_pixel_inside: torch.Tensor  # [N] bool
 
 
-def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Tensor:
+def owned_occupancy(masks: torch.Tensor, owners: torch.Tensor, stride: int) -> torch.Tensor:
+    """[N, S, S], owner map [S, S] -> [N, S/st, S/st]: fraction of each cell's pixels owned by
+    instance i. One bincount over the owner map instead of N pooling passes."""
+    n, h, w = masks.shape
+    hs, ws = h // stride, w // stride
+    ys, xs = torch.meshgrid(torch.arange(h, device=masks.device), torch.arange(w, device=masks.device), indexing="ij")
+    cell = (ys // stride) * ws + (xs // stride)
+    valid = owners >= 0
+    key = owners[valid] * (hs * ws) + cell[valid]
+    counts = torch.bincount(key, minlength=n * hs * ws).view(n, hs, ws).float()
+    return counts / (stride * stride)
+
+
+def instance_centers(masks: torch.Tensor, how: str, stride: int = 4, owners: torch.Tensor | None = None,
+                     masks_s: torch.Tensor | None = None) -> torch.Tensor:
     """[N, S, S] bool -> [N, 2] (x, y) full-res pixels; (-1, -1) for an empty mask.
-    "deepest*" work on the mask at `stride`."""
+    "deepest*" work on the mask at `stride`. owners / masks_s (area-averaged masks at `stride`) can
+    be passed in to share work with the caller."""
     n, h, w = masks.shape
     out = torch.full((n, 2), -1.0)
     if n == 0:
@@ -94,13 +109,16 @@ def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Te
         return out
     if how in ("deepest", "deepest_owned"):
         st, half = stride, (stride - 1) / 2
-        regions = masks
+        if masks_s is None:
+            masks_s = F.avg_pool2d(masks[:, None].float(), st)[:, 0]
         if how == "deepest_owned":
-            owners = owner_map(masks)                                           # one pass for all instances
-            regions = masks & (owners[None] == torch.arange(n).view(-1, 1, 1))
-            covered = ~regions.flatten(1).any(1) & visible                      # fully covered -> whole mask
-            regions[covered] = masks[covered]
-        occ = F.avg_pool2d(regions[:, None].float(), st)[:, 0]                 # [N, h/st, w/st] occupancy
+            if owners is None:
+                owners = owner_map(masks)                                       # one pass for all instances
+            occ = owned_occupancy(masks, owners, st)                            # [N, h/st, w/st]
+            covered = ~(occ > 0).flatten(1).any(1) & visible                    # fully covered -> whole mask
+            occ[covered] = masks_s[covered]
+        else:
+            occ = masks_s
         has_half = (occ >= 0.5).flatten(1).any(1).view(-1, 1, 1)
         small = torch.where(has_half, occ >= 0.5, occ > 0)
         # for a CENTRE the canvas border counts as a boundary (unlike pointer depth): pad with False;
@@ -112,7 +130,9 @@ def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Te
                 continue
             j = int(score[i].argmax())
             cy, cx = j // small.shape[2], j % small.shape[2]
-            block = regions[i, cy * st:cy * st + st, cx * st:cx * st + st]       # a region pixel inside that cell,
+            block = masks[i, cy * st:cy * st + st, cx * st:cx * st + st]         # a pixel of the instance in that cell
+            if how == "deepest_owned" and not covered[i]:                       # (owned by it, unless fallback)
+                block = block & (owners[cy * st:cy * st + st, cx * st:cx * st + st] == i)
             by, bx = torch.nonzero(block, as_tuple=True)                        # closest to the cell centre
             k = int(((by.float() - half) ** 2 + (bx.float() - half) ** 2).argmin())
             out[i, 0], out[i, 1] = cx * st + int(bx[k]), cy * st + int(by[k])
@@ -121,7 +141,10 @@ def instance_centers(masks: torch.Tensor, how: str, stride: int = 4) -> torch.Te
 
 
 def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
-                generator: torch.Generator | None = None) -> SegGT:
+                generator: torch.Generator | None = None, masks_s4: torch.Tensor | None = None,
+                owners: torch.Tensor | None = None) -> SegGT:
+    """masks_s4 (area-averaged masks at stride_mask) and owners (owner_map) may be passed in by the
+    caller to share the expensive full-resolution passes with select / pointer."""
     masks, labels = t.masks, t.labels
     n, S, _ = masks.shape
     s8, s4 = cfg.stride_heat, cfg.stride_mask
@@ -137,15 +160,16 @@ def make_seg_gt(t: Transformed, num_classes: int, cfg: SegGtCfg = SegGtCfg(),
         heat_valid &= ~(F.avg_pool2d(t.crowd[None, None].float(), s8)[0, 0] > 0)
         mask_valid &= ~(F.avg_pool2d(t.crowd[None, None].float(), s4)[0, 0] > 0)
 
-    masks_s4 = F.avg_pool2d(masks[:, None].float(), s4)[:, 0] if n else torch.zeros(0, S // s4, S // s4)
-    centers = instance_centers(masks, cfg.center, s4)
+    if masks_s4 is None:
+        masks_s4 = F.avg_pool2d(masks[:, None].float(), s4)[:, 0] if n else torch.zeros(0, S // s4, S // s4)
+    centers = instance_centers(masks, cfg.center, s4, owners, masks_s4)
     center_pixel_inside = torch.zeros(n, dtype=torch.bool)
     if n == 0:
         return SegGT(heat, heat_valid, torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long),
                      masks_s4, mask_valid, centers, center_pixel_inside)
 
     area = masks.flatten(1).sum(1).float()
-    occ8 = F.avg_pool2d(masks[:, None].float(), s8)[:, 0]                      # [N, h8, w8] occupancy
+    occ8 = F.avg_pool2d(masks_s4[:, None], s8 // s4)[:, 0] if s8 % s4 == 0 else F.avg_pool2d(masks[:, None].float(), s8)[:, 0]
     ys = torch.arange(h8, dtype=torch.float32).view(-1, 1)
     xs = torch.arange(w8, dtype=torch.float32).view(1, -1)
     order = sorted(range(n), key=lambda i: (-float(area[i]), -i))              # area desc, index desc: smaller
