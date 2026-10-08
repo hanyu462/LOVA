@@ -1,22 +1,24 @@
-"""Pseudo ground truth for R ("profile" target) built from the pointed instance mask.
+"""Pseudo ground truth R* for the R predictor, built on the fly from the pointed instance mask
+(after augmentation; nothing is stored). Two definitions:
 
-    R*(x) = R_in(x) = R_b + (1 - R_b) * s(x)^gamma          x inside the mask
-            R_out(x) = R_b * exp(-d_out(x) / lambda)        x outside
+mode "geo" (default)  pointer-centred, boundary value varies along the boundary
+    R_in(x)  = exp[-(d_g(p, x) / sigma_in)^gamma]            x in M
+    R_out(x) = R_in(b(x)) * exp(-d_out(x) / sigma_out)        x not in M
+    d_g      : geodesic distance from the pointer INSIDE the mask (8-neighbour chamfer
+               propagation, <= ~8% from true Euclidean geodesic)
+    sigma_in : fraction of the max geodesic distance in the object (so R_in on the farthest
+               boundary point = exp(-1) for sigma_in = 1), gamma = 2 -> Gaussian-like plateau
+               around the pointer
+    b(x)     : nearest boundary cell; its R_in value is carried outward by the same propagation
+    sigma_out: pixels (context halo)
 
-    s(x) in [0,1]: how deep inside the object x is
-        mode "dt"     : D_in(x) / max D_in     (mask distance transform; exactly R_b on the
-                        boundary for any shape, 1 at the deepest point, pointer-invariant)
-        mode "euclid" : 1 - ||x - p|| / d_max  (1 at the pointer; R_b only approximately on
-                        the boundary of non-convex / elongated objects)
-    d_out(x): Euclidean distance (cells) from the cell centre to the mask boundary.
+mode "dt"             object-centred, constant boundary value (first version, kept for comparison)
+    R_in(x)  = r_b + (1 - r_b) * (D_in(x) / max D_in)^gamma   (depth inside the mask)
+    R_out(x) = r_b * exp(-d_out(x) / sigma_out)
 
-Asymmetric by design: a gentle 1 -> R_b ramp inside (focus), a fast R_b -> 0 decay outside
-(context halo), 0 far away. Under binary execution G = 1[R > 0.5] only the halo width matters
-(R_out = 0.5 at d = lambda * ln(R_b / 0.5)); the interior ramp is kept for continuous /
-multi-level variants and for the R-bin analysis.
-
-Pure torch (CPU or GPU), exact Euclidean distance transform via the boundary cells
-(the nearest TRUE cell of a set is always one of its boundary cells).
+Resolution: compute on the mask you pass (full input resolution recommended so thin structures
+keep their geometry), then `downsample(r, 4)` to the R predictor's stride. All torch, CPU or GPU.
+Under binary execution G = 1[R > 0.5] the active area is {R* > 0.5}; see `viz_rtarget.py`.
 """
 from __future__ import annotations
 
@@ -25,68 +27,121 @@ import math
 import torch
 import torch.nn.functional as F
 
+_SHIFTS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+           (-1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (1, 1, math.sqrt(2))]
 
-def distance_transform(mask: torch.Tensor) -> torch.Tensor:
-    """mask [B, h, w] bool -> [B, h, w] float: Euclidean distance (cells) to the nearest TRUE cell
-    (0 on TRUE cells, +inf for an all-false mask). Batched over B with a padded boundary set."""
+
+def _shift(x: torch.Tensor, dy: int, dx: int, fill: float) -> torch.Tensor:
+    """x [B, h, w] shifted so that out[y, x] = x[y - dy, x - dx] (fill outside)."""
+    b, h, w = x.shape
+    out = torch.full_like(x, fill)
+    ys, yd = (slice(0, h - dy), slice(dy, h)) if dy >= 0 else (slice(-dy, h), slice(0, h + dy))
+    xs, xd = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
+    out[:, yd, xd] = x[:, ys, xs]
+    return out
+
+
+def propagate(dist: torch.Tensor, value: torch.Tensor, allowed: torch.Tensor,
+              max_iter: int = 4096, check_every: int = 16):
+    """Chamfer (8-neighbour) distance propagation with value carry-over.
+    dist [B,h,w] (0 at seeds, inf elsewhere), value [B,h,w] (value at seeds), allowed [B,h,w] bool:
+    cells that may be reached. Returns (dist, value) where value[x] = value at the seed nearest to x."""
+    inf = float("inf")
+    for it in range(max_iter):
+        best_d, best_v = dist, value
+        for dy, dx, wgt in _SHIFTS:
+            cand = _shift(dist, dy, dx, inf) + wgt
+            better = (cand < best_d) & allowed
+            best_v = torch.where(better, _shift(value, dy, dx, 0.0), best_v)
+            best_d = torch.where(better, cand, best_d)
+        if (it + 1) % check_every == 0 and torch.equal(best_d, dist):
+            return best_d, best_v
+        dist, value = best_d, best_v
+    return dist, value
+
+
+def distance_transform(mask: torch.Tensor, max_dist: float | None = None) -> torch.Tensor:
+    """mask [B,h,w] bool -> chamfer distance (cells) to the nearest TRUE cell. max_dist caps the
+    propagation (cells farther than that keep +inf), which bounds the cost for large maps."""
     b, h, w = mask.shape
-    dev = mask.device
-    pad = F.pad(mask, (1, 1, 1, 1), value=False)
-    interior = pad[:, :-2, 1:-1] & pad[:, 2:, 1:-1] & pad[:, 1:-1, :-2] & pad[:, 1:-1, 2:]
-    bnd = mask & ~interior  # [B, h, w]
-    ys, xs = torch.meshgrid(torch.arange(h, device=dev, dtype=torch.float32),
-                            torch.arange(w, device=dev, dtype=torch.float32), indexing="ij")
-    grid = torch.stack([ys.reshape(-1), xs.reshape(-1)], 1)  # [N, 2]
-    out = torch.full((b, h * w), float("inf"), device=dev)
-    counts = bnd.flatten(1).sum(1)
-    nmax = int(counts.max().item()) if b else 0
-    if nmax == 0:
-        return out.view(b, h, w)
-    # padded boundary coordinates [B, nmax, 2]; pad slots far away so they never win
-    pts = torch.full((b, nmax, 2), 1e6, device=dev)
-    for i in range(b):
-        idx = bnd[i].flatten().nonzero()[:, 0]
-        pts[i, :len(idx)] = grid[idx]
-    d = torch.cdist(grid[None].expand(b, -1, -1), pts)  # [B, N, nmax]
-    out = d.min(2).values
-    out = torch.where(mask.flatten(1), torch.zeros_like(out), out)
-    out[counts == 0] = float("inf")
-    return out.view(b, h, w)
+    dist = torch.where(mask, torch.zeros(b, h, w, device=mask.device), torch.full((b, h, w), float("inf"), device=mask.device))
+    val = torch.zeros_like(dist)
+    allowed = torch.ones_like(mask)
+    iters = 4096 if max_dist is None else int(math.ceil(max_dist)) + 1
+    d, _ = propagate(dist, val, allowed, max_iter=iters)
+    return d
 
 
-def r_profile(pointed_mask4: torch.Tensor, pointers: torch.Tensor | None = None, r_b: float = 0.7,
-              gamma: float = 0.7, lam: float = 6.4, mode: str = "dt") -> torch.Tensor:
-    """pointed_mask4 [B, 1, h, w] (soft or binary) -> R* [B, 1, h, w] in [0, 1].
-    pointers [B, 2] (x, y) in input pixels, only used by mode="euclid". lam in cells."""
-    m = pointed_mask4[:, 0] > 0.5
+def _pointer_cells(pointers: torch.Tensor, stride: int, h: int, w: int):
+    px = (pointers[:, 0] / stride).long().clamp(0, w - 1)
+    py = (pointers[:, 1] / stride).long().clamp(0, h - 1)
+    return px, py
+
+
+def r_profile(pointed_mask: torch.Tensor, pointers: torch.Tensor, mode: str = "geo",
+              sigma_in: float = 1.0, gamma: float = 2.0, sigma_out: float = 25.6,
+              r_b: float = 0.7, mask_stride: int = 1) -> torch.Tensor:
+    """pointed_mask [B,1,H,W] (soft or binary) at input resolution / `mask_stride`,
+    pointers [B,2] (x, y) in INPUT pixels, sigma_out in INPUT pixels -> R* [B,1,H,W] in [0,1]."""
+    m = pointed_mask[:, 0] > 0.5
     empty = ~m.flatten(1).any(1)
-    if empty.any():  # degenerate (tiny) mask: fall back to its max cells
-        mx = pointed_mask4[:, 0].flatten(1).max(1).values.view(-1, 1, 1)
-        m = torch.where(empty.view(-1, 1, 1), pointed_mask4[:, 0] >= mx, m)
+    if empty.any():
+        mx = pointed_mask[:, 0].flatten(1).max(1).values.view(-1, 1, 1)
+        m = torch.where(empty.view(-1, 1, 1), pointed_mask[:, 0] >= mx, m)
     b, h, w = m.shape
+    dev = m.device
+    inf = float("inf")
+    s_out = max(sigma_out / mask_stride, 1e-6)  # cells
+    cap_out = 6.0 * s_out  # beyond ~6 sigma R_out < 0.0025 -> treat as 0
+
+    if mode == "geo":
+        # seed = pointer cell, snapped into the mask if it fell just outside
+        px, py = _pointer_cells(pointers, mask_stride, h, w)
+        seed = torch.zeros_like(m)
+        seed[torch.arange(b, device=dev), py, px] = True
+        outside = seed & ~m
+        if outside.any():  # snap: move the seed to the mask cell closest to the pointer
+            ys, xs = torch.meshgrid(torch.arange(h, device=dev, dtype=torch.float32),
+                                    torch.arange(w, device=dev, dtype=torch.float32), indexing="ij")
+            for i in outside.nonzero()[:, 0].tolist():
+                dd = (ys - py[i].float()) ** 2 + (xs - px[i].float()) ** 2
+                dd = torch.where(m[i], dd, torch.full_like(dd, inf))
+                j = int(dd.flatten().argmin().item())
+                seed[i] = False
+                seed[i, j // w, j % w] = True
+        dist = torch.where(seed, torch.zeros(b, h, w, device=dev), torch.full((b, h, w), inf, device=dev))
+        d_g, _ = propagate(dist, torch.zeros_like(dist), m)  # geodesic inside the mask
+        d_g = torch.where(m, d_g, torch.zeros_like(d_g))
+        d_max = d_g.flatten(1).max(1).values.clamp(min=1e-6).view(b, 1, 1)
+        r_in = torch.exp(-((d_g / (sigma_in * d_max)).clamp(min=0)) ** gamma)
+        # outward: seeds = mask cells, carried value = R_in on the (boundary) seed
+        dist0 = torch.where(m, torch.zeros(b, h, w, device=dev), torch.full((b, h, w), inf, device=dev))
+        d_out, r_bnd = propagate(dist0, torch.where(m, r_in, torch.zeros_like(r_in)), torch.ones_like(m),
+                                 max_iter=int(math.ceil(cap_out)) + 1)
+        d_out = (d_out - 0.5).clamp(min=0)  # cell centre -> boundary
+        r_out = torch.where(torch.isfinite(d_out), r_bnd * torch.exp(-d_out / s_out), torch.zeros_like(d_out))
+        return torch.where(m, r_in, r_out)[:, None].float()
+
     if mode == "dt":
-        d_in = (distance_transform(~m) - 0.5).clamp(min=0)  # depth: cell centre -> boundary
+        d_in = (distance_transform(~m) - 0.5).clamp(min=0)
         d_in = torch.where(m, d_in, torch.zeros_like(d_in))
         s = d_in / d_in.flatten(1).max(1).values.clamp(min=1e-6).view(b, 1, 1)
-    elif mode == "euclid":
-        ys, xs = torch.meshgrid(torch.arange(h, device=m.device, dtype=torch.float32),
-                                torch.arange(w, device=m.device, dtype=torch.float32), indexing="ij")
-        p = (pointers.float() / 4.0).view(b, 2, 1, 1)
-        dist = torch.sqrt((xs + 0.5 - p[:, 0]) ** 2 + (ys + 0.5 - p[:, 1]) ** 2)
-        d_max = torch.where(m, dist, torch.zeros_like(dist)).flatten(1).max(1).values.clamp(min=1e-6).view(b, 1, 1)
-        s = (1.0 - dist / d_max).clamp(0, 1)
-    else:
-        raise ValueError(mode)
-    r_in = r_b + (1.0 - r_b) * s.pow(gamma)
-    d_out = (distance_transform(m) - 0.5).clamp(min=0)
-    r_out = r_b * torch.exp(-d_out / max(lam, 1e-6))
-    return torch.where(m, r_in, r_out)[:, None].float()
+        r_in = r_b + (1.0 - r_b) * s.pow(gamma)
+        d_out = (distance_transform(m, max_dist=cap_out) - 0.5).clamp(min=0)
+        r_out = torch.where(torch.isfinite(d_out), r_b * torch.exp(-d_out / s_out), torch.zeros_like(d_out))
+        return torch.where(m, r_in, r_out)[:, None].float()
+    raise ValueError(mode)
+
+
+def downsample(r: torch.Tensor, stride: int) -> torch.Tensor:
+    """R* [B,1,H,W] -> [B,1,H/stride,W/stride] (area average = bilinear-with-antialias for integer strides)."""
+    return r if stride == 1 else F.avg_pool2d(r, stride)
 
 
 def sample_interior_pointer(mask4: torch.Tensor, frac: float = 0.25,
                             generator: torch.Generator | None = None) -> torch.Tensor:
-    """mask4 [h, w] -> random cell with depth D_in >= frac * max D_in (never right at the boundary),
-    in input-pixel coordinates like common.sample_pointer."""
+    """mask4 [h, w] (stride 4) -> random cell with depth >= frac * max depth (never right at the
+    boundary), in input-pixel coordinates like common.sample_pointer."""
     m = mask4 > 0.5
     if not m.any():
         m = mask4 >= mask4.max()
@@ -100,11 +155,11 @@ def sample_interior_pointer(mask4: torch.Tensor, frac: float = 0.25,
     return torch.tensor([(x + off[0].item()) * 4, (y + off[1].item()) * 4])
 
 
-def lam_cells(img_size: int, frac: float = 0.05) -> float:
-    """lambda = frac * min(H, W) input pixels, in stride-4 cells (512 px, 0.05 -> 6.4 cells)."""
-    return frac * img_size / 4.0
+def sigma_out_px(img_size: int, frac: float = 0.05) -> float:
+    """sigma_out = frac * min(H, W) input pixels (512 px, 0.05 -> 25.6 px)."""
+    return frac * img_size
 
 
-def halo_cells(r_b: float, lam: float, tau: float = 0.5) -> float:
-    """Distance outside the mask (cells) where R_out crosses tau: the binary-execution halo."""
-    return lam * math.log(r_b / tau) if r_b > tau else 0.0
+def halo_px(r_boundary: float, sigma_out: float, tau: float = 0.5) -> float:
+    """Distance outside the mask (px) where R_out crosses tau, for a boundary value r_boundary."""
+    return sigma_out * math.log(r_boundary / tau) if r_boundary > tau else 0.0

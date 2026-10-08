@@ -65,13 +65,20 @@ def test_shapes_and_grads():
     rb = sample_r(batch["pointed_mask4"], kind="binary")
     assert set(rb.unique().tolist()) <= {0.0, 1.0}, "binary sampler must produce {0,1}"
 
-    # R* profile: 1 at the deepest point, ~r_b on the boundary, decaying outside, 0 far away
-    from lova.data.rtarget import r_profile
-    rs = r_profile(batch["pointed_mask4"], batch["pointer"], r_b=0.7, gamma=0.7, lam=3.0)
-    m = batch["pointed_mask4"] > 0.5
-    assert rs.shape == batch["pointed_mask4"].shape and rs.min() >= 0 and rs.max() <= 1
-    assert (rs[m].min() >= 0.7 - 1e-4) and (rs[m].max() > 0.99)
-    assert rs[~m].max() <= 0.7 + 1e-4 and rs[~m].min() < 0.05
+    # R* profile (geo): 1 at the pointer, decaying inside, carried over the boundary, ~0 far away
+    from lova.data.rtarget import downsample, r_profile
+    ds_s = SyntheticPointerDataset(8, img_size=128, pointer_mode="interior", mask_stride=2)
+    bs = collate([ds_s[i] for i in range(4)])
+    assert bs["pointed_mask_s"].shape == (4, 1, 64, 64)
+    rs = downsample(r_profile(bs["pointed_mask_s"], bs["pointer"], "geo", 1.0, 2.0, 6.0, mask_stride=2), 2)
+    m = bs["pointed_mask4"] > 0.5
+    assert rs.shape == bs["pointed_mask4"].shape and rs.min() >= 0 and rs.max() <= 1
+    assert rs[m].max() > 0.9 and rs[~m].min() < 0.05
+    for i in range(4):  # pointer cell is (near) the maximum
+        px, py = (bs["pointer"][i] / 4).long().clamp(0, 31).tolist()
+        assert rs[i, 0, py, px] > 0.8, rs[i, 0, py, px]
+    rd = r_profile(bs["pointed_mask4"], bs["pointer"], "dt", 1.0, 0.7, 12.0, r_b=0.7, mask_stride=4)
+    assert rd[m].min() >= 0.7 - 1e-4 and rd[~m].max() <= 0.7 + 1e-4
     # multi-pointer items share image/targets and differ in pointer
     ds2 = SyntheticPointerDataset(8, img_size=128, pointer_mode="interior", pointers_per_image=2)
     item = ds2[0]

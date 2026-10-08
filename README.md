@@ -48,11 +48,13 @@ python eval_pointer.py --ckpt runs/Ab/last.pth --coco-root $COCO --r-mode ones -
 
 ## R pseudo-GT profile (phase B/C)
 
-Instead of `L_R_in` (lower bound) + weak `L_R_out`, regress R onto a profile built from the pointed mask:
-`1 -> r_b` inside (depth-based), `r_b * exp(-d/lambda)` outside, 0 far away. See `lova/data/rtarget.py`.
+Instead of `L_R_in` (lower bound) + weak `L_R_out`, regress R onto a profile built on the fly from the pointed mask:
+`R_in = exp(-(d_geodesic/sigma_in)^gamma)` from the pointer inside, boundary value carried outward with
+`exp(-d/sigma_out)`, 0 far away. See `lova/data/rtarget.py`.
 
 ```bash
 python scripts/viz_rtarget.py --coco-root $COCO --n 6 --out viz_rtarget       # look at R* first
+python scripts/viz_rtarget.py --coco-root $COCO --image-id 139 --instance 0 --pointer 300,200 --r-sigma-in 0.8 --out viz_rtarget/id139
 torchrun --nproc_per_node 4 train.py --phase B --gate-mode binary --r-target profile --pointer-mode interior --pointers-per-image 2 --bs 16 --init runs/Ab/last.pth --coco-root $COCO --epochs 3 --amp --out runs/Bp
 torchrun --nproc_per_node 4 train.py --phase C --gate-mode binary --r-target profile --pointer-mode interior --pointers-per-image 2 --bs 16 --gate-temp-final 0.05 --init runs/Bp/last.pth --coco-root $COCO --epochs 8 --amp --out runs/Cp
 ```

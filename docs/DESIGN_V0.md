@@ -307,25 +307,32 @@ V1 :  G = 1[R > τ] hard, STE
 
 ### R pseudo-GT profile (`--r-target profile`, 2026-10-08 추가)
 
-B/C의 R 지도를 L_R_in(하한) + 약한 L_R_out 대신 pointed mask에서 만든 연속 profile R*로의 회귀로 바꿀 수 있다.
+B/C의 R 지도를 L_R_in(하한) + 약한 L_R_out 대신, augmentation 후 pointed mask에서 **매 iteration 즉석 생성**하는
+연속 profile R*로의 회귀로 바꿀 수 있다(저장하지 않음. crop/flip/포인터가 매번 달라지므로).
 
 ```
-R*(x) = r_b + (1 − r_b)·(D_in(x)/max D_in)^γ     x ∈ M   (내부: 깊을수록 1, 경계 r_b)
-      = r_b · exp(−d_out(x)/λ)                   x ∉ M   (외부: 빠르게 0)
-기본값 r_b = 0.7, γ = 0.7, λ = 0.05·S (512px → 6.4 cell)
+R_in(x)  = exp[ −( d_g(p,x) / (σ_in · d_max) )^γ ]      x ∈ M   d_g: mask 내부 geodesic 거리(포인터 기준)
+R_out(x) = R_in(b(x)) · exp( −d_out(x) / σ_out )          x ∉ M   b(x): 가장 가까운 경계점(값을 바깥으로 전파)
+기본값 σ_in = 1.0 (최대 geodesic 거리 비율), γ = 2 (포인터 주변 plateau), σ_out = 0.05·S px
 ```
 
-- 내부는 mask distance transform(깊이) 기반이라 모양과 무관하게 경계가 정확히 r_b이고 포인터 jitter에 불변.
-  포인터 기준 Euclidean(`--r-profile-mode euclid`)도 가능.
-- 이것은 §1-4의 "mask copy 금지"를 **B에서는 의도적으로 포기**하는 것이다. R*는 (포인터, 해당 mask)로 결정되므로
-  B의 R_θ는 "interactive segmentation + halo" predictor가 된다. image-driven 성분(E7)은 C에서 profile 가중치가
-  감쇠(1 → 0.1)한 뒤 task loss + budget이 만든다.
-- binary 실행에서는 내부 ramp가 실행에 영향이 없고 **halo 폭만** 실행 면적을 정한다:
-  R_out = 0.5인 거리 = λ·ln(r_b/0.5) ≈ 0.34λ (기본값 2.2 cell ≈ 9px). λ가 사실상 compute 손잡이다.
+- 포인터 중심이며 **경계값이 경계 위치마다 다르다**(포인터에 가까운 경계는 높고 먼 경계는 낮음). 바깥은 그 경계값을
+  이어받아 빠르게 감소. U자형 물체에서 Euclidean으로 가깝지만 geodesic으로 먼 반대편 팔은 낮게 나온다(검증됨).
+- geodesic과 외부 거리는 8-이웃 chamfer 전파(torch, GPU)로 계산한다. 정확한 Euclidean 대비 ≤ 9% 오차.
+- 생성 해상도 `--r-gt-stride`: 1(full) / 2 / 4. 가는 구조를 위해 full-res가 이상적이나 4090 B=32 기준
+  full 1.55 s, stride-2 0.19 s라 기본은 2이고, 그 뒤 area 평균으로 stride 4로 내린다. 데이터셋이 pointed 인스턴스의
+  transformed mask를 해당 stride로 추가 반환한다(`pointed_mask_s`). 숫자는 서버에서 재측정할 것.
+- 첫 버전(`--r-profile-mode dt`: 경계 상수 r_b=0.7, 깊이 기반 내부)은 비교용으로 남긴다.
+- 이것은 §1-4의 "mask copy 금지"를 **B에서는 의도적으로 포기**하는 것이다. image-driven 성분(E7)은 C에서 profile
+  가중치가 감쇠(1 → 0.1)한 뒤 task loss + budget이 만든다.
+- binary 실행에서는 실행 영역 = {R* > 0.5}. 내부에서는 포인터로부터 d_g < σ_in·d_max·(ln2)^(1/γ)(기본 0.83·d_max),
+  바깥은 경계값 r_b(x)에 대해 σ_out·ln(r_b(x)/0.5)까지. σ_in·σ_out이 compute 손잡이다.
 - 포인터 샘플링 `--pointer-mode interior`(깊이 ≥ 25% max), 이미지당 K 포인터 `--pointers-per-image K`
   (같은 이미지·다른 인스턴스가 한 배치에 → R_θ(I,p_A) ≠ R_θ(I,p_B)를 직접 학습).
-- Top-K 큰 물체만 쓰지 않는다: E2에서 R 효과가 가장 큰 것이 작은 물체였고, 평가 분포(전 인스턴스)와도 맞춰야 한다.
-- R*는 GPU에서 배치로 즉석 생성(B=32에 20ms)하므로 로더·추론 비용이 없다. `scripts/viz_rtarget.py`로 먼저 본다.
+- crop 후 사라진 인스턴스는 `finalize`가 걸러낸다(stride-4 면적 < 1 cell). Top-K 큰 물체만 쓰지 않는다:
+  E2에서 R 효과가 가장 큰 것이 작은 물체였고, 평가 분포(전 인스턴스)와도 맞춰야 한다.
+- `scripts/viz_rtarget.py`는 학습과 같은 `r_profile`을 import해 그린다. `--image-id/--instance/--pointer/--seed`로
+  조건을 고정해 파라미터를 비교하고, augmentation은 `--aug`일 때만 켠다.
 
 ### 용어
 

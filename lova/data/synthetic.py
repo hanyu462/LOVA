@@ -21,10 +21,11 @@ class SyntheticPointerDataset(Dataset):
     num_classes = len(SHAPES) * len(TINTS)
 
     def __init__(self, length: int = 512, img_size: int = 256, max_objects: int = 6, seed: int = 0,
-                 max_pos: int = 256, pointer_mode: str = "uniform", pointers_per_image: int = 1):
+                 max_pos: int = 256, pointer_mode: str = "uniform", pointers_per_image: int = 1,
+                 mask_stride: int | None = None):
         assert img_size % 32 == 0
         self.length, self.size, self.max_objects, self.seed, self.max_pos = length, img_size, max_objects, seed, max_pos
-        self.pointer_mode, self.pointers_per_image = pointer_mode, pointers_per_image
+        self.pointer_mode, self.pointers_per_image, self.mask_stride = pointer_mode, pointers_per_image, mask_stride
 
     def __len__(self):
         return self.length
@@ -66,4 +67,5 @@ class SyntheticPointerDataset(Dataset):
         return finalize(image, valid4, masks4, classes, self.num_classes,
                         {**meta, "scale": 1.0, "offset": (0, 0), "new_size": (self.size, self.size), "flip": False},
                         pointed=pointed, generator=g, max_pos=self.max_pos, pointer_mode=self.pointer_mode,
-                        pointers_per_image=self.pointers_per_image if pointed is None else 1)
+                        pointers_per_image=self.pointers_per_image if pointed is None else 1,
+                        mask_fn=(lambda i: F.avg_pool2d(masks[i][None, None], self.mask_stride)[0]) if self.mask_stride else None)

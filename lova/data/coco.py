@@ -25,13 +25,15 @@ from .common import MEAN, STD, finalize
 class COCOPointerDataset(Dataset):
     def __init__(self, root: str, split: str = "train2017", img_size: int = 512, train: bool = True,
                  scale_range=(0.6, 1.25), min_area: float = 32.0, max_pos: int = 256,
-                 pointer_mode: str = "uniform", pointers_per_image: int = 1):
+                 pointer_mode: str = "uniform", pointers_per_image: int = 1, mask_stride: int | None = None):
+        """mask_stride: also return the pointed instance's transformed mask at this stride
+        (sample["pointed_mask_s"]) for the R* profile; None = stride-4 masks only."""
         from pycocotools.coco import COCO
 
         assert img_size % 32 == 0
         self.root, self.split, self.size, self.train = root, split, img_size, train
         self.scale_range, self.min_area, self.max_pos = scale_range, min_area, max_pos
-        self.pointer_mode, self.pointers_per_image = pointer_mode, pointers_per_image
+        self.pointer_mode, self.pointers_per_image, self.mask_stride = pointer_mode, pointers_per_image, mask_stride
         self.coco = COCO(os.path.join(root, "annotations", f"instances_{split}.json"))
         self.cat_ids = sorted(self.coco.getCatIds())
         self.cat_to_label = {c: i for i, c in enumerate(self.cat_ids)}
@@ -82,6 +84,23 @@ class COCOPointerDataset(Dataset):
         tf = dict(scale=s, new_size=(nh, nw), offset=(ox, oy), flip=flip)
         return image, valid4, masks4, tf
 
+    def _mask_fn(self, masks, tf):
+        """Closure: original instance index -> transformed mask [1, S/st, S/st] at self.mask_stride."""
+        st = self.mask_stride
+        nh, nw = tf["new_size"]
+        ox, oy = tf["offset"]
+        S = self.size
+
+        def fn(i):
+            m = F.interpolate(masks[i][None, None], size=(nh // st, nw // st), mode="area")[0]
+            if tf["flip"]:
+                m = m.flip(-1)
+            out = torch.zeros(1, S // st, S // st)
+            ch, cw = min(nh - oy, S), min(nw - ox, S)
+            out[:, :ch // st, :cw // st] = m[:, oy // st:(oy + ch) // st, ox // st:(ox + cw) // st]
+            return out
+        return fn
+
     def __getitem__(self, index, pointed: int | None = None):
         img, masks, classes, meta = self.load(index)
         for attempt in range(5):
@@ -89,7 +108,8 @@ class COCOPointerDataset(Dataset):
             image, valid4, masks4, tf = self._transform(img, masks, train)
             sample = finalize(image, valid4, masks4, classes, self.num_classes, {**meta, **tf},
                               pointed=pointed, max_pos=self.max_pos, pointer_mode=self.pointer_mode,
-                              pointers_per_image=self.pointers_per_image if pointed is None else 1)
+                              pointers_per_image=self.pointers_per_image if pointed is None else 1,
+                              mask_fn=self._mask_fn(masks, tf) if self.mask_stride else None)
             if sample is not None:
                 return sample
         return None

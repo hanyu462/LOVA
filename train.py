@@ -24,7 +24,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from lova.data.common import collate
-from lova.data.rtarget import lam_cells, r_profile
+from lova.data.rtarget import downsample, r_profile, sigma_out_px
 from lova.losses import instance_loss, r_losses, r_profile_loss, r_stats
 from lova.models.model import LOVAv0
 from lova.rsampler import sample_r
@@ -83,10 +83,16 @@ def get_args(argv=None):
     p.add_argument("--r-target", choices=["legacy", "profile"], default="legacy",
                    help="legacy = L_R_in (lower bound) + weak L_R_out; profile = regress R onto R* "
                         "(weight --w-r-in, decays in phase C like legacy). Budget is kept in both")
-    p.add_argument("--r-b", type=float, default=0.7, help="profile: R* on the object boundary")
-    p.add_argument("--r-gamma", type=float, default=0.7, help="profile: interior ramp exponent")
-    p.add_argument("--r-lam-frac", type=float, default=0.05, help="profile: lambda = frac * img_size (px)")
-    p.add_argument("--r-profile-mode", choices=["dt", "euclid"], default="dt")
+    p.add_argument("--r-profile-mode", choices=["geo", "dt"], default="geo",
+                   help="geo: R_in = exp(-(d_geodesic/sigma_in)^gamma) from the pointer, boundary value carried "
+                        "outward; dt: constant boundary r_b, depth-based interior")
+    p.add_argument("--r-sigma-in", type=float, default=1.0, help="geo: sigma_in as a fraction of the max geodesic distance")
+    p.add_argument("--r-gamma", type=float, default=2.0, help="interior exponent (geo: 2 = Gaussian-like; dt: ramp)")
+    p.add_argument("--r-sigma-out-frac", type=float, default=0.05, help="sigma_out = frac * img_size (px)")
+    p.add_argument("--r-b", type=float, default=0.7, help="dt mode only: R* on the boundary")
+    p.add_argument("--r-gt-stride", type=int, default=2, choices=[1, 2, 4],
+                   help="resolution at which R* is built before downsampling to stride 4 "
+                        "(1 = full res, keeps thin structures; 4090 B=32: 1 -> 1.5 s, 2 -> 0.19 s)")
     p.add_argument("--r-loss", choices=["bce", "mse"], default="bce")
     # pointer sampling
     p.add_argument("--pointer-mode", choices=["uniform", "interior"], default="uniform",
@@ -111,10 +117,17 @@ def build_dataset(a, train=True):
     if a.data == "synthetic":
         from lova.data.synthetic import SyntheticPointerDataset
         return SyntheticPointerDataset(a.synthetic_len if train else 200, a.img_size, seed=0 if train else 1,
-                                       pointer_mode=a.pointer_mode, pointers_per_image=a.pointers_per_image)
+                                       pointer_mode=a.pointer_mode, pointers_per_image=a.pointers_per_image,
+                                       mask_stride=mask_stride(a))
     from lova.data.coco import COCOPointerDataset
     return COCOPointerDataset(a.coco_root, a.train_split if train else "val2017", a.img_size, train=train,
-                              pointer_mode=a.pointer_mode, pointers_per_image=a.pointers_per_image)
+                              pointer_mode=a.pointer_mode, pointers_per_image=a.pointers_per_image,
+                              mask_stride=mask_stride(a))
+
+
+def mask_stride(a):
+    """Finer pointed mask only when the profile target needs it (and only finer than stride 4)."""
+    return a.r_gt_stride if (a.r_target == "profile" and a.phase in ("B", "C") and a.r_gt_stride < 4) else None
 
 
 def to_device(batch, dev):
@@ -170,8 +183,9 @@ def compute_loss(model, batch, a, progress):
             exec_map = torch.sigmoid((r.float() - tau) / m.backbone.gate_temp)
         if a.r_target == "profile":
             with torch.no_grad():
-                r_star = r_profile(batch["pointed_mask4"], batch["pointer"], a.r_b, a.r_gamma,
-                                   lam_cells(a.img_size, a.r_lam_frac), a.r_profile_mode)
+                pm, st = (batch["pointed_mask_s"], a.r_gt_stride) if "pointed_mask_s" in batch else (batch["pointed_mask4"], 4)
+                r_star = downsample(r_profile(pm, batch["pointer"], a.r_profile_mode, a.r_sigma_in, a.r_gamma,
+                                              sigma_out_px(a.img_size, a.r_sigma_out_frac), a.r_b, st), 4 // st)
             rl = r_losses(r, batch["pointed_mask4"], batch["valid4"], 0.0, 0.0, a.w_budget, a.budget_extra,
                           exec_map=exec_map)
             losses["r_budget"] = rl["r_budget"]

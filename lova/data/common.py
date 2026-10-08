@@ -38,23 +38,30 @@ def sample_pointer(mask4: torch.Tensor, generator: torch.Generator | None = None
     return torch.tensor([(x + off[0].item()) * 4, (y + off[1].item()) * 4])
 
 
-def with_pointer(sample: dict, pointed: int, generator=None, mode: str = "uniform") -> dict:
+def with_pointer(sample: dict, pointed: int, generator=None, mode: str = "uniform", mask_fn=None) -> dict:
     """Same image / targets, different pointed instance (targets do not depend on the pointer)."""
     out = dict(sample)
     out["pointed"] = pointed
     out["pointer"] = sample_pointer(sample["masks4"][pointed], generator, mode)
+    if mask_fn is not None:
+        out["pointed_mask_s"] = mask_fn(pointed)
     return out
 
 
 def finalize(image, valid4, masks4, classes, num_classes, meta, pointed=None,
-             generator=None, max_pos=256, pointer_mode="uniform", pointers_per_image=1):
+             generator=None, max_pos=256, pointer_mode="uniform", pointers_per_image=1, mask_fn=None):
     """Returns one sample dict, or a list of `pointers_per_image` samples sharing the image and
-    targets but pointing at different instances (None if no instance survives)."""
+    targets but pointing at different instances (None if no instance survives).
+    mask_fn(i) -> [1, S/s, S/s] transformed mask of ORIGINAL instance index i at a finer stride s
+    (for the R* profile); stored as sample["pointed_mask_s"]."""
     keep = masks4.flatten(1).sum(1) >= 1.0  # drop instances that vanished after resize/crop
+    orig_index = keep.nonzero()[:, 0].tolist()  # kept index -> original instance index
     if pointed is not None:
         if not keep[pointed]:
             return None
         pointed = int(keep[:pointed].sum())
+    if mask_fn is not None:
+        _mask_fn, mask_fn = mask_fn, (lambda i: _mask_fn(orig_index[i]))
     masks4, classes = masks4[keep], classes[keep]
     meta = dict(meta)
     if "ann_ids" in meta:
@@ -68,12 +75,14 @@ def finalize(image, valid4, masks4, classes, num_classes, meta, pointed=None,
     heat, pos_index, pos_inst = build_targets(masks4, classes, num_classes, max_pos, generator)
     sample = dict(image=image, valid4=valid4, masks4=masks4, classes=classes, pointer=pointer,
                   pointed=pointed, heat=heat, pos_index=pos_index, pos_inst=pos_inst, meta=meta)
+    if mask_fn is not None:
+        sample["pointed_mask_s"] = mask_fn(pointed)
     if pointers_per_image <= 1:
         return sample
     # K pointers on K distinct instances when possible (same instance, new pointer otherwise)
     order = torch.randperm(n, generator=generator).tolist()
     others = [i for i in order if i != pointed] + [pointed] * pointers_per_image
-    return [sample] + [with_pointer(sample, j, generator, pointer_mode) for j in others[:pointers_per_image - 1]]
+    return [sample] + [with_pointer(sample, j, generator, pointer_mode, mask_fn) for j in others[:pointers_per_image - 1]]
 
 
 def collate(batch):
@@ -88,6 +97,8 @@ def collate(batch):
         "heat": torch.stack([b["heat"] for b in batch]),
         "pointed_mask4": torch.stack([b["masks4"][b["pointed"]][None] for b in batch]),
     }
+    if "pointed_mask_s" in batch[0]:
+        out["pointed_mask_s"] = torch.stack([b["pointed_mask_s"] for b in batch])
     for k in ("masks4", "classes", "pos_index", "pos_inst", "pointed", "meta"):
         out[k] = [b[k] for b in batch]
     return out
