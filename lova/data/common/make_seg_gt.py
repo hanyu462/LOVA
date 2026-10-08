@@ -23,12 +23,12 @@ mask of "the instance centred at q". The GT therefore has three parts and an ign
     center_pixel_inside [N]    whether the centre PIXEL lies on the instance mask (concave shapes may
                                not for "centroid"); the stride-8 centre cell is always a positive anyway
 
-Centre definition (cfg.center):
-    "centroid"       mask centroid (V0). Outside the mask for ~6 % of COCO instances (concave shapes)
-    "deepest"        cell with the largest depth of the mask: always on the mask
-    "deepest_owned"  same, but on the pixels the instance OWNS (minus every smaller instance that
-                     covers it, the pointer ownership rule). A dining table annotated together with
-                     the plates on it gets its centre on visible table, not on a plate
+Centre definition (cfg.center), default "deepest_owned":
+    "deepest_owned"  deepest cell of the pixels the instance OWNS (minus every smaller instance that
+                     covers it, the pointer ownership rule): always on the mask, never on another
+                     annotated object. Unannotated things (COCO has no "plate") stay part of the mask
+    "deepest"        deepest cell of the whole mask: always on the mask, may sit on a covering object
+    "centroid"       mask centroid (V0): outside the mask for ~6 % of COCO instances (concave shapes)
 Gaussian sigma = max(sigma_min, sqrt(area) / 8 / sigma_div) cells.
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ from .transform import Transformed
 class SegGtCfg:
     stride_heat: int = 8        # heatmap / kernel grid
     stride_mask: int = 4        # mask feature grid (dice targets)
-    center: str = "centroid"    # "centroid" | "deepest" | "deepest_owned"
+    center: str = "deepest_owned"  # "deepest_owned" (default, 2026-10-08) | "deepest" | "centroid" (V0; ablations)
     sigma_min: float = 0.8      # gaussian sigma lower bound (cells)
     sigma_div: float = 6.0      # sigma = object size (cells) / sigma_div
     pos_occupancy: float = 0.25 # a 3x3 neighbour cell counts as inside if >= this fraction of it is mask

@@ -41,7 +41,7 @@ def fake_transformed(S=128):
 
 def unit_test():
     t = fake_transformed()
-    gt = make_seg_gt(t, num_classes=3, cfg=SegGtCfg())
+    gt = make_seg_gt(t, num_classes=3, cfg=SegGtCfg(center="centroid"))   # V0 centre for the geometry checks below
     h8 = 16
     assert gt.heat.shape == (3, h8, h8) and gt.heat_valid.shape == (h8, h8) and gt.masks_s4.shape == (3, 32, 32)
     # peaks exactly 1 at each instance centre cell, in its own class channel
@@ -61,6 +61,7 @@ def unit_test():
     cx, cy = gt_o.centers[0].tolist()
     assert bool(t.masks[0, int(cy), int(cx)]) and not bool(t.masks[1, int(cy), int(cx)]), "owned: on the square, off the disc"
     assert bool(gt_o.center_pixel_inside.all())
+    assert SegGtCfg().center == "deepest_owned" and bool(make_seg_gt(t, 3).center_pixel_inside.all()), "default"
     # ownership: the disc (smaller) owns its centre cell although it lies inside the square
     pos = dict(zip(gt.pos_index.tolist(), gt.pos_inst.tolist()))
     cx, cy = [int(round((float(v) + 0.5) / 8 - 0.5)) for v in gt.centers[1]]
@@ -118,7 +119,7 @@ def main():
     p.add_argument("--size", type=int, default=640)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval", action="store_true")
-    p.add_argument("--center", default="centroid", choices=["centroid", "deepest", "deepest_owned"])
+    p.add_argument("--center", default="deepest_owned", choices=["centroid", "deepest", "deepest_owned"])
     p.add_argument("--stats", type=int, default=0, help="N random images: centre-outside rate etc. (no window)")
     p.add_argument("--out", default=None)
     a = p.parse_args()
