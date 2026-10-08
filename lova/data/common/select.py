@@ -55,11 +55,12 @@ def keep_by_ratio(ratios: torch.Tensor, threshold: float) -> list[int]:
 
 def select(t: Transformed, cfg: SelectCfg = SelectCfg(), masks_s4: torch.Tensor | None = None) -> list[int]:
     """Pointer candidates of a transformed sample (indices into t.masks), largest first.
-    masks_s4: optional area-averaged masks at stride 4 (sums equal the full-res areas), to share
-    the pooling pass with make_seg_gt; the ratio is then taken over the stride-4 valid area."""
+    masks_s4: optional area-averaged masks at stride 4 to share the pooling pass with make_seg_gt.
+    EXACT: the transform zeroes masks outside `valid`, so sum(masks_s4) * 16 is the full-res visible
+    area and the denominator is the full-res valid area; the >= threshold decision is identical."""
     if masks_s4 is not None:
-        v4 = torch.nn.functional.avg_pool2d(t.valid[None, None].float(), 4)[0, 0]
-        ratios = (masks_s4 * v4).flatten(1).sum(1) / v4.sum().clamp(min=1e-6)
+        stride2 = float(t.masks.shape[-1] * t.masks.shape[-2]) / float(masks_s4.shape[-1] * masks_s4.shape[-2])
+        ratios = masks_s4.flatten(1).sum(1) * stride2 / t.valid.float().sum().clamp(min=1)
     else:
         ratios = visible_ratios(t.masks, t.valid)
     if cfg.exclude_labels:

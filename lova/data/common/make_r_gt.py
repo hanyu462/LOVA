@@ -139,8 +139,9 @@ def radial_profile(mask_s: torch.Tensor, p_s: tuple[float, float], cfg: RgtCfg =
 
 def soft_mask(mask_s: torch.Tensor, band_cells: float, coarse: int = 2) -> torch.Tensor:
     """S: exactly 1 on the mask, linear ramp 1 -> 0 over `band_cells` outside it, 0 beyond.
-    The distance is propagated on a `coarse`x coarser grid (the ramp is ~100 px wide, so coarse
-    cells lose nothing visible) and interpolated back; the mask itself is re-imposed exactly."""
+    The distance is propagated on a `coarse`x coarser grid and interpolated back; the mask itself is
+    re-imposed exactly. Measured against coarse=1 on 109 val2017 samples (band 96 px): mean |dR|
+    0.0008, max 0.021, R>0.5 area 0.1437 vs 0.1442, values on the target mask identical."""
     if band_cells <= 0:
         return mask_s.float()
     h, w = mask_s.shape

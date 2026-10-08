@@ -56,6 +56,14 @@ def unit_test():
     assert r_crop[0] == 0 and r_crop[2] > 0                                   # square gone, bar visible
     assert 0 not in select(crop, SelectCfg(0.001)) and select(crop, SelectCfg(0.5)) == []
     assert select(full) == select(full, SelectCfg(0.01)), "default cfg"
+    # the shared-pooling path is exactly the full-resolution ratio
+    import torch.nn.functional as F
+    for tt in (full, crop):
+        m4 = F.avg_pool2d(tt.masks[:, None].float(), 4)[:, 0]
+        stride2 = 16.0
+        r_fast = m4.flatten(1).sum(1) * stride2 / tt.valid.float().sum()
+        assert torch.allclose(r_fast, visible_ratios(tt.masks, tt.valid), atol=1e-6)
+        assert select(tt, SelectCfg(0.001), m4) == select(tt, SelectCfg(0.001))
     # class exclusion removes an instance from the candidates but not from the masks
     assert 0 in select(full, SelectCfg(0.001)) and 0 not in select(full, SelectCfg(0.001, exclude_labels=frozenset({0})))
     assert full.masks.shape[0] == 3
