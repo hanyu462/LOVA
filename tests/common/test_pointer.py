@@ -20,7 +20,7 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lova.data.common.geometry import depth, distance_to  # noqa: E402
+from lova.utils.geometry import depth, distance_to  # noqa: E402
 from lova.data.common.pointer import (PointerCfg, make_pointer, owner_of, pick_target, pointer_region,  # noqa: E402
                                       safe_region, sample_from, sample_pointer, sampling_region)
 from lova.data.common.select import SelectCfg, select  # noqa: E402

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .geometry import depth, erode  # grid primitives live in geometry.py; this file is policy only
+from ...utils.geometry import depth, erode  # grid primitives live in lova/utils/geometry.py; this file is policy only
 from .transform import Transformed
 
 

@@ -14,6 +14,7 @@ lova/
   models/    stem, R predictor, R-gated backbone, neck, head
   losses/    task losses (focal, dice), R losses (profile, budget)
   engine/    training / evaluation loops (phases, DDP, logging); no model or data logic here
+  utils/     shared pure helpers used by more than one package (grid geometry, ...)
 configs/     experiment settings (one file per run type), so commands stay short and reproducible
 scripts/     offline, run-once tools: dataset download, checkpoint conversion, stats
 tests/       one script per module that only CALLS it: unit test + visualisation (PNG) where applicable

@@ -22,7 +22,7 @@ import torch
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lova.data.common.geometry import depth, downsample_mask, geodesic, pointer_to_stride, seed_cell  # noqa: E402
+from lova.utils.geometry import depth, downsample_mask, geodesic, pointer_to_stride, seed_cell  # noqa: E402
 from lova.data.common.make_rgt import (RgtCfg, field_stats, inside_profile, make_r_in, make_rgt,  # noqa: E402
                                        outside_profile, radial_profile, soft_mask, to_supervision)
 from lova.data.common.pointer import PointerCfg, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402

@@ -1,6 +1,6 @@
-"""lova.data.common.geometry: pure grid-geometry checks on synthetic masks (no data needed).
+"""lova.utils.geometry: pure grid-geometry checks on synthetic masks (no data needed).
 
-    python tests/common/test_geometry.py
+    python tests/utils/test_geometry.py
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lova.data.common.geometry import (depth, distance_to, downsample_mask, erode, geodesic,  # noqa: E402
+from lova.utils.geometry import (depth, distance_to, downsample_mask, erode, geodesic,  # noqa: E402
                                        pointer_to_stride, propagate_value, seed_cell)
 
 

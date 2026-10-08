@@ -34,7 +34,7 @@ Resolution: geometry is computed on the mask downsampled by `stride` (2 -> 320 x
 canvas); the pointer is mapped with the half-pixel convention p' = (p + 0.5) / stride - 0.5 and
 snapped to the nearest mask cell if downsampling left its cell outside. The R predictor is
 supervised at stride 4: to_supervision(r, 4 // stride) area-averages the continuous field.
-Grid primitives (downsample, geodesic, chamfer propagation) live in geometry.py; this file only
+Grid primitives (downsample, geodesic, chamfer propagation) live in lova/utils/geometry.py; this file only
 defines R.
 
 OUTSIDE profile:
@@ -58,7 +58,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .geometry import (distance_to, downsample_mask, geodesic, pointer_to_stride, propagate_value,  # noqa: F401
+from ...utils.geometry import (distance_to, downsample_mask, geodesic, pointer_to_stride, propagate_value,  # noqa: F401
                        seed_cell)
 
 
