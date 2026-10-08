@@ -5,7 +5,7 @@
     python tests/common/test_make_rgt.py --root datasets/coco --image-id 2153 --seed 0 --pointers 4 --gamma 1.0
 
 Window, one row per pointer on the SAME target instance:
-    [RGB + pointer | target mask | R_GT heatmap (red high, blue low) | R_GT contours 0.9 / 0.7 / 0.5 / 0.3]
+    [RGB + pointer + mask outline | R_in @ stride 2 | R_GT @ stride 2 | R_GT @ stride 4 (supervision) | contours of R_GT @ 4]
 What to check: R = 1 at the pointer, smooth decrease that follows the object's shape, continuous
 across the boundary, faster decay outside than inside (thin halo), 0 far away, and clearly
 different fields for different pointers. --inside-only shows step 5-1 alone.
@@ -24,7 +24,8 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.pointer import PointerCfg, depth, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
 from lova.data.common.make_rgt import (RgtCfg, downsample_mask, geodesic_from_pointer, inside_profile,  # noqa: E402
-                                       make_r_in, make_rgt, outside_profile, pointer_to_stride, seed_cell)
+                                       make_r_in, make_rgt, outside_profile, pointer_to_stride, seed_cell,
+                                       to_supervision)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
 from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
@@ -97,9 +98,12 @@ def unit_test():
     rb = make_rgt(m, (27, 30), RgtCfg(stride=1, lambda_out_px=6.0))
     assert rb[30, 17] > rb[25, 112] > 0, (float(rb[30, 17]), float(rb[25, 112]))
     assert torch.equal(outside_profile(m, inside_profile(m, dg, cfg), RgtCfg(stride=1))[m], r[m]), "inside untouched"
-    # stride-2 end to end: shape and range
+    # stride-2 end to end: shape and range; supervision at stride 4 = 2x2 area average
     r2 = make_rgt(m, (27, 30), RgtCfg(stride=2))
     assert r2.shape == (64, 64) and r2.min() >= 0 and r2.max() <= 1
+    r4 = to_supervision(r2, 2)
+    assert r4.shape == (32, 32) and abs(float(r4[0, 0]) - float(r2[0:2, 0:2].mean())) < 1e-6
+    assert torch.equal(to_supervision(r2, 1), r2)
     print("make_rgt unit test OK")
 
 
@@ -157,21 +161,28 @@ def main():
     rows = []
     for k in range(a.pointers):
         ptr = sample_from(region, g)
-        r = (make_r_in if a.inside_only else make_rgt)(mask, ptr, cfg)  # [S/st, S/st]
-        rr = torch.nn.functional.interpolate(r[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
-        img_rgb = draw_pointer(base.copy(), ptr)
-        img_mask = draw_pointer(overlay_masks(base, mask[None], labels=[names[idx]]), ptr)
-        heat = torch.stack([rr, torch.zeros_like(rr), 1 - rr], 0) * 0.7 + torch.from_numpy(np.array(base)).permute(2, 0, 1).float() / 255 * 0.3
-        img_heat = draw_pointer(Image.fromarray((heat.clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)), ptr)
+        r_in = make_r_in(mask, ptr, cfg)                                 # [S/st, S/st]
+        r = r_in if a.inside_only else make_rgt(mask, ptr, cfg)
+        r4 = to_supervision(r, max(4 // a.stride, 1))                    # supervision resolution (stride 4)
+        up = lambda f: torch.nn.functional.interpolate(f[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
+        rr = up(r4)                                                      # contours / numbers below refer to the stride-4 field
+        base_t = torch.from_numpy(np.array(base)).permute(2, 0, 1).float() / 255
+
+        def heatmap(f):
+            h = torch.stack([f, torch.zeros_like(f), 1 - f], 0) * 0.7 + base_t * 0.3
+            return draw_pointer(Image.fromarray((h.clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)), ptr)
+        img_rgb = draw_pointer(overlay_masks(base, mask[None], filled=[], labels=[names[idx]]), ptr)
+        r4_nearest = torch.nn.functional.interpolate(r4[None, None], size=(S, S), mode="nearest")[0, 0]  # show the real cells
+        img_in, img_s2, img_s4 = heatmap(up(r_in)), heatmap(up(r)), heatmap(r4_nearest)
         cont = np.asarray(base).copy()
         for lvl, col in ((0.9, (255, 255, 255)), (0.7, (255, 200, 0)), (0.5, (255, 100, 0)), (0.3, (200, 0, 200))):
             above = rr >= lvl   # iso-contour = cells above the level that touch a cell below it
             touches_below = torch.nn.functional.max_pool2d((~above).float()[None, None], 3, 1, 1)[0, 0] > 0
             cont[(above & touches_below).numpy()] = col
         img_cont = draw_pointer(Image.fromarray(cont), ptr)
-        rows.append(hstack([img_rgb, img_mask, img_heat, img_cont],
-                           [f"pointer {k}: ({ptr[0]},{ptr[1]})", f"target: {names[idx]}",
-                            f"{'R_in' if a.inside_only else 'R_GT'} (red 1 -> blue 0)", "contours 0.9 0.7 0.5 0.3"]))
+        rows.append(hstack([img_rgb, img_in, img_s2, img_s4, img_cont],
+                           [f"pointer {k}: ({ptr[0]},{ptr[1]})  target {names[idx]}", f"R_in @ stride {a.stride}",
+                            f"R_GT @ stride {a.stride}", "R_GT @ stride 4 (supervision, nearest)", "contours of R_GT@4: 0.9 0.7 0.5 0.3"]))
         # numbers: profile along the pointer row (stride cells) and boundary range
         px, py = pointer_to_stride(ptr, a.stride)
         row = r[int(round(py))]

@@ -15,8 +15,8 @@
 
 Resolution: geometry is computed on the mask downsampled by `stride` (2 -> 320 x 320 for a 640
 canvas); the pointer is mapped with the half-pixel convention p' = (p + 0.5) / stride - 0.5 and
-snapped to the nearest mask cell if downsampling left its cell outside. Supervision at stride 4 is
-a later bilinear downsample of the continuous field.
+snapped to the nearest mask cell if downsampling left its cell outside. The R predictor is
+supervised at stride 4: to_supervision(r, 4 // stride) area-averages the continuous field.
 
 OUTSIDE profile:
     b(x)        nearest mask cell to the outside cell x (chamfer propagation outward from the mask
@@ -150,6 +150,12 @@ def make_r_in(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tens
     mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)
     seed = seed_cell(mask_s, pointer_to_stride(pointer, cfg.stride))
     return inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
+
+
+def to_supervision(r: torch.Tensor, factor: int) -> torch.Tensor:
+    """R_GT at the geometry stride -> the R predictor's stride (area average over factor x factor
+    cells, which for integer factors equals antialiased bilinear downsampling). factor 1 = identity."""
+    return r if factor == 1 else F.avg_pool2d(r[None, None], factor)[0, 0]
 
 
 def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
