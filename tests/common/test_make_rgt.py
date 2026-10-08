@@ -86,7 +86,12 @@ def unit_test():
     assert 0.8 * bval < ring1 <= bval, (bval, ring1)                   # continuous across the boundary (exp(-0.5/lambda))
     assert r_full[64, 64 + 28] < r_full[64, 64 + 24] < r_full[64, 64 + 20], "monotone decay outside"
     assert abs(float(r_full[64, 64 + 28]) / float(r_full[64, 64 + 20]) - math_exp(-8 / 4)) < 0.1, "exp(-d/lambda)"
-    assert float(r_full[64, 64 + 20 + 30]) == 0.0, "zero beyond ~6 lambda"
+    assert float(r_full[64, 64 + 20 + 30]) == 0.0, "zero beyond 6 lambda"
+    # exact distance cutoff, also on the diagonal (where one propagation step covers sqrt(2) cells)
+    yy2, xx2 = torch.meshgrid(torch.arange(S), torch.arange(S), indexing="ij")
+    euclid = torch.sqrt((yy2 - 64.0) ** 2 + (xx2 - 64.0) ** 2) - 20.0      # ~distance to the disc boundary
+    assert float(r_full[euclid > 6 * 4 + 2].max()) == 0.0, "nothing beyond the cutoff in any direction"
+    assert float(r_full[(euclid < 6 * 4 - 2) & ~disc].min()) > 0.0, "everything inside the cutoff is reached"
     assert float(r_full[0, 0]) == 0.0
     # boundary value is carried outward: the outside near the pointer side is higher than far side
     rb = make_rgt(m, (27, 30), RgtCfg(stride=1, lambda_out_px=6.0))

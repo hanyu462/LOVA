@@ -25,8 +25,9 @@ OUTSIDE profile:
     R_out(x)    = R_in(b(x)) * exp(-d_out(x) / lambda_out),   lambda_out in pixels (absolute)
 
     The value is continuous across the boundary (R_out -> R_in(b) as d_out -> 0) and decays much
-    faster outside than inside (lambda_out << lambda_in for all but tiny objects). Cells farther
-    than 6 * lambda_out are 0 (exp(-6) < 0.003), which also bounds the propagation cost.
+    faster outside than inside (lambda_out << lambda_in for all but tiny objects). Cells with
+    d_out > 6 * lambda_out are exactly 0 (exp(-6) < 0.003); the propagation runs only as many
+    iterations as that distance needs.
 
 Pure torch on [h, w] tensors (CPU or GPU).
 """
@@ -123,7 +124,9 @@ def outside_profile(mask_s: torch.Tensor, r_in: torch.Tensor, cfg: RgtCfg = RgtC
     exp(-d_out / lambda_out). Returns [h, w] with R_in kept on the mask itself."""
     inf = float("inf")
     lam = cfg.lambda_out_px / cfg.stride                      # cells
-    reach = int(math.ceil(6.0 * lam)) + 1                     # beyond this R_out < 0.003 -> 0
+    cutoff = 6.0 * lam                                        # R_out definition: 0 beyond this distance (exp(-6) < 0.003)
+    reach = int(math.ceil(cutoff)) + 1                        # propagation budget only (one step per iteration; a step
+                                                              # is 1 or sqrt(2) cells, so this is NOT the distance cutoff)
     d = torch.where(mask_s, torch.zeros_like(r_in), torch.full_like(r_in, inf))
     v = torch.where(mask_s, r_in, torch.zeros_like(r_in))
     for _ in range(reach):
@@ -137,7 +140,8 @@ def outside_profile(mask_s: torch.Tensor, r_in: torch.Tensor, cfg: RgtCfg = RgtC
             break
         d, v = best_d, best_v
     d_out = (d - 0.5).clamp(min=0)                            # cell centre -> boundary
-    r_out = torch.where(torch.isfinite(d_out), v * torch.exp(-d_out / lam), torch.zeros_like(v))
+    within = torch.isfinite(d_out) & (d_out <= cutoff)
+    r_out = torch.where(within, v * torch.exp(-d_out / lam), torch.zeros_like(v))
     return torch.where(mask_s, r_in, r_out)
 
 
