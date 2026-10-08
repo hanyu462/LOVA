@@ -1,20 +1,14 @@
-"""Step 1 of the data pipeline: COCO image id -> original image + one mask per instance.
+"""COCO reader: image id -> Sample (see lova/data/common/sample.py for the contract).
 
-    coco   = open_coco(root, split)                 once per process
-    sample = load(coco, img_id)                     per sample
+    cs     = open_coco(root, split)     once per process (annotation index + label map)
+    sample = load(cs, img_id)           per sample
 
-    sample.image    PIL RGB, original size (H, W)
-    sample.masks    bool  [N, H, W]   rasterised polygon of every non-crowd instance
-    sample.labels   long  [N]         contiguous class index 0..K-1 (sorted COCO category ids)
-    sample.ann_ids  list  [N]         COCO annotation ids (for evaluation / bookkeeping)
-    sample.areas    float [N]         COCO annotation area (polygon area; the rasterised mask can
-                                      differ by a few pixels). Cheap; later steps that need the
-                                      area of a transformed mask use mask.sum() instead
-    sample.ratios   float [N]         annotation area / (H * W): what later steps threshold on
-    sample.crowd    bool  [H, W]      union of iscrowd=1 regions: groups of objects without
-                                      individual annotations. Not an instance (never a pointer or
-                                      segmentation target) but NOT background either: the loss
-                                      step must ignore these pixels, so the region is carried along
+COCO specifics handled here:
+  * instances  = annotations with iscrowd=0; polygons rasterised with annToMask -> masks [N,H,W]
+  * labels     = COCO category ids (1..90 with gaps) sorted and mapped to 0..79
+  * areas      = annotation "area" (polygon area; the raster can differ by a few pixels). Cheap;
+                 steps that need the area of a transformed mask use mask.sum() instead
+  * crowd      = union of iscrowd=1 regions (RLE) -> Sample.crowd ignore mask
 
 Nothing is resized, cropped or filtered here. This is the only module that reads files or uses
 pycocotools; every later step takes tensors, so it can be tested on synthetic masks.
@@ -27,6 +21,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from PIL import Image
+
+from ..common.sample import Sample
 
 
 @dataclass
@@ -58,25 +54,6 @@ def open_coco(root: str, split: str = "train2017") -> CocoSet:
     cat_ids = sorted(coco.getCatIds())
     names = {c["id"]: c["name"] for c in coco.loadCats(cat_ids)}
     return CocoSet(coco, root, split, cat_ids, {c: i for i, c in enumerate(cat_ids)}, names)
-
-
-@dataclass
-class Sample:
-    image_id: int
-    image: Image.Image
-    masks: torch.Tensor      # [N, H, W] bool
-    labels: torch.Tensor     # [N] long
-    ann_ids: list[int]
-    areas: torch.Tensor      # [N] float, annotation area
-    ratios: torch.Tensor     # [N] float, annotation area / (H * W)
-    crowd: torch.Tensor      # [H, W] bool, ignore region (union of iscrowd=1)
-
-    @property
-    def size(self) -> tuple[int, int]:
-        return self.image.height, self.image.width
-
-    def __len__(self) -> int:
-        return len(self.ann_ids)
 
 
 def load(cs: CocoSet, img_id: int) -> Sample:

@@ -7,8 +7,10 @@ Rebuilt from scratch, one verified step at a time. Previous iteration (V0, worki
 
 ```
 lova/
-  data/      per-sample pipeline, in execution order: load → select → transform → pointer → targets → R*
-             each step = one module with a pure function (tensor in / tensor out), tested in tests/
+  data/
+    common/  dataset-agnostic pipeline: sample.py (the Sample contract) then, in execution order,
+             select → transform → pointer → targets → R*; pure functions on tensors, tested in tests/
+    coco/    COCO reader (files + pycocotools -> Sample). Other readers (synthetic, custom) go beside it
   models/    stem, R predictor, R-gated backbone, neck, head
   losses/    task losses (focal, dice), R losses (profile, budget)
   engine/    training / evaluation loops (phases, DDP, logging); no model or data logic here

@@ -1,4 +1,4 @@
-"""lova.data.load: unit test on an in-memory COCO + visual check on real COCO.
+"""lova.data.coco.load: unit test on an in-memory COCO + visual check on real COCO.
 
     python tests/test_load.py                                   # unit test only (no data)
     python tests/test_load.py --coco-root datasets/coco --n 4   # + PNGs in viz/load/
@@ -21,7 +21,7 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lova.data.load import CocoSet, load, open_coco  # noqa: E402
+from lova.data.coco.load import CocoSet, load, open_coco  # noqa: E402
 from tests.viz import overlay_masks  # noqa: E402
 
 
