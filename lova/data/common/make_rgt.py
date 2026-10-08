@@ -34,6 +34,8 @@ Resolution: geometry is computed on the mask downsampled by `stride` (2 -> 320 x
 canvas); the pointer is mapped with the half-pixel convention p' = (p + 0.5) / stride - 0.5 and
 snapped to the nearest mask cell if downsampling left its cell outside. The R predictor is
 supervised at stride 4: to_supervision(r, 4 // stride) area-averages the continuous field.
+Grid primitives (downsample, geodesic, chamfer propagation) live in geometry.py; this file only
+defines R.
 
 OUTSIDE profile:
     b(x)        nearest mask cell to the outside cell x (chamfer propagation outward from the mask
@@ -56,9 +58,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .geometry import SHIFTS as _SHIFTS
-from .geometry import distance_to
-from .geometry import shift as _shift
+from .geometry import (distance_to, downsample_mask, geodesic, pointer_to_stride, propagate_value,  # noqa: F401
+                       seed_cell)
 
 
 @dataclass(frozen=True)
@@ -78,51 +79,6 @@ class RgtCfg:
     mask_thr: float = 0.5       # downsampled soft mask -> bool
 
 
-def downsample_mask(mask: torch.Tensor, stride: int, thr: float = 0.5) -> torch.Tensor:
-    """[S, S] bool -> [S/stride, S/stride] bool (area average >= thr)."""
-    if stride == 1:
-        return mask
-    return F.avg_pool2d(mask[None, None].float(), stride)[0, 0] >= thr
-
-
-def pointer_to_stride(xy, stride: int) -> tuple[float, float]:
-    """Full-res pixel (x, y) -> continuous cell coordinates at `stride` (half-pixel convention)."""
-    return (float(xy[0]) + 0.5) / stride - 0.5, (float(xy[1]) + 0.5) / stride - 0.5
-
-
-def seed_cell(mask_s: torch.Tensor, p_s: tuple[float, float]) -> tuple[int, int]:
-    """Nearest mask cell (y, x) to the continuous pointer p_s = (x, y); snaps if the rounded cell is
-    outside the (downsampled) mask."""
-    h, w = mask_s.shape
-    cx, cy = int(round(p_s[0])), int(round(p_s[1]))
-    cx, cy = min(max(cx, 0), w - 1), min(max(cy, 0), h - 1)
-    if mask_s[cy, cx]:
-        return cy, cx
-    ys, xs = torch.nonzero(mask_s, as_tuple=True)
-    if len(ys) == 0:
-        raise ValueError("empty mask")
-    d2 = (ys.float() - p_s[1]) ** 2 + (xs.float() - p_s[0]) ** 2
-    j = int(d2.argmin())
-    return int(ys[j]), int(xs[j])
-
-
-def geodesic_from_pointer(mask_s: torch.Tensor, seed: tuple[int, int], max_iter: int = 4096) -> torch.Tensor:
-    """mask_s [h, w] bool, seed (y, x) inside it -> [h, w] float: geodesic (within-mask) chamfer
-    distance from the seed; +inf outside the mask and in mask parts not connected to the seed."""
-    inf = float("inf")
-    d = torch.full_like(mask_s, inf, dtype=torch.float32)
-    d[seed] = 0.0
-    for _ in range(max_iter):
-        best = d
-        for dy, dx, wgt in _SHIFTS:
-            best = torch.minimum(best, _shift(d, dy, dx, inf) + wgt)
-        best = torch.where(mask_s, best, torch.full_like(best, inf))  # may only travel through the mask
-        if torch.equal(best, d):
-            return d
-        d = best
-    return d
-
-
 def inside_profile(mask_s: torch.Tensor, d_g: torch.Tensor, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
     """R_in = exp(-(d_g / lambda_in)^gamma) on the mask, 0 elsewhere. lambda_in = frac * max finite d_g."""
     finite = torch.isfinite(d_g) & mask_s
@@ -135,25 +91,12 @@ def inside_profile(mask_s: torch.Tensor, d_g: torch.Tensor, cfg: RgtCfg = RgtCfg
 
 
 def outside_profile(mask_s: torch.Tensor, r_in: torch.Tensor, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
-    """R_out on cells outside the mask: the R_in value of the nearest mask cell, decayed with
-    exp(-d_out / lambda_out). Returns [h, w] with R_in kept on the mask itself."""
-    inf = float("inf")
+    """A: R_out on cells outside the mask = R_in value of the nearest mask cell, decayed with
+    exp(-d_out / lambda_out); exactly 0 beyond 6 lambda_out. R_in is kept on the mask itself."""
     lam = cfg.lambda_out_px / cfg.stride                      # cells
     cutoff = 6.0 * lam                                        # R_out definition: 0 beyond this distance (exp(-6) < 0.003)
-    reach = int(math.ceil(cutoff)) + 1                        # propagation budget only (one step per iteration; a step
-                                                              # is 1 or sqrt(2) cells, so this is NOT the distance cutoff)
-    d = torch.where(mask_s, torch.zeros_like(r_in), torch.full_like(r_in, inf))
-    v = torch.where(mask_s, r_in, torch.zeros_like(r_in))
-    for _ in range(reach):
-        best_d, best_v = d, v
-        for dy, dx, wgt in _SHIFTS:
-            cand = _shift(d, dy, dx, inf) + wgt
-            better = cand < best_d
-            best_v = torch.where(better, _shift(v, dy, dx, 0.0), best_v)
-            best_d = torch.where(better, cand, best_d)
-        if torch.equal(best_d, d):
-            break
-        d, v = best_d, best_v
+    reach = int(math.ceil(cutoff)) + 1                        # propagation budget only (a step is 1 or sqrt 2 cells)
+    d, v = propagate_value(mask_s, torch.where(mask_s, r_in, torch.zeros_like(r_in)), reach)
     d_out = (d - 0.5).clamp(min=0)                            # cell centre -> boundary
     within = torch.isfinite(d_out) & (d_out <= cutoff)
     r_out = torch.where(within, v * torch.exp(-d_out / lam), torch.zeros_like(v))
@@ -164,7 +107,7 @@ def make_r_in(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tens
     """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_in [S/stride, S/stride] (0 outside)."""
     mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)
     seed = seed_cell(mask_s, pointer_to_stride(pointer, cfg.stride))
-    return inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
+    return inside_profile(mask_s, geodesic(mask_s, seed), cfg)
 
 
 def to_supervision(r: torch.Tensor, factor: int) -> torch.Tensor:
@@ -201,7 +144,7 @@ def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tenso
     p_s = pointer_to_stride(pointer, cfg.stride)
     if cfg.mode == "geodesic":
         seed = seed_cell(mask_s, p_s)
-        r_in = inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
+        r_in = inside_profile(mask_s, geodesic(mask_s, seed), cfg)
         return outside_profile(mask_s, r_in, cfg)
     if cfg.mode == "radial":
         return radial_profile(mask_s, p_s, cfg)

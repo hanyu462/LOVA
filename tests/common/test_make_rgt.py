@@ -22,10 +22,10 @@ import torch
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lova.data.common.pointer import PointerCfg, depth, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
-from lova.data.common.make_rgt import (RgtCfg, downsample_mask, field_stats, geodesic_from_pointer,  # noqa: E402
-                                       inside_profile, make_r_in, make_rgt, outside_profile, pointer_to_stride,
-                                       radial_profile, seed_cell, soft_mask, to_supervision)
+from lova.data.common.geometry import depth, downsample_mask, geodesic, pointer_to_stride, seed_cell  # noqa: E402
+from lova.data.common.make_rgt import (RgtCfg, field_stats, inside_profile, make_r_in, make_rgt,  # noqa: E402
+                                       outside_profile, radial_profile, soft_mask, to_supervision)
+from lova.data.common.pointer import PointerCfg, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
 from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
@@ -45,7 +45,7 @@ def unit_test():
     m[20:110, 95:110] = True         # right arm
     seed = seed_cell(m, (27.0, 30.0))
     assert seed == (30, 27)
-    dg = geodesic_from_pointer(m, seed)
+    dg = geodesic(m, seed)
     assert dg[30, 27] == 0 and torch.isinf(dg[60, 65]), "outside the mask -> inf"
     assert dg[25, 102] > dg[105, 27] > 0, "far arm is farther than the bottom of the own arm"
     assert dg[25, 102] > 150, "geodesic goes around (~75 + 75 + 75 cells), not straight across (75)"

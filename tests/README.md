@@ -4,7 +4,9 @@ One script per module. Each imports the module and (1) asserts on a small synthe
 default, PNGs with `--out`. Never re-implements module logic. `tests/util/` holds shared helpers
 (argument handling, drawing) only.
 
+    python tests/common/test_geometry.py                 # grid primitives, synthetic only
     python tests/coco/test_load.py --root datasets/coco --image-id 139
     python tests/common/test_transform.py --root datasets/coco --image-id 2153 --seed 3
     python tests/common/test_select.py --root datasets/coco --image-id 39769 --seed 5
     python tests/common/test_pointer.py --root datasets/coco --image-id 39769 --seed 5 --k 30 --all
+    python tests/common/test_make_rgt.py --root datasets/coco --image-id 2153 --seed 0 --target 1 --pointers 2

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .geometry import distance_to
+from .geometry import depth, erode  # grid primitives live in geometry.py; this file is policy only
 from .transform import Transformed
 
 
@@ -45,23 +45,6 @@ class PointerCfg:
     alpha: float = 0.1        # safe interior: depth >= alpha * max depth of the object
     depth_stride: int = 4     # resolution at which the depth map is computed
     erode_px: int = 2         # require Chebyshev distance >= erode_px + 1 from any non-mask pixel (full res)
-
-
-def depth(mask: torch.Tensor) -> torch.Tensor:
-    """mask [h, w] bool -> [h, w] float: how deep a mask cell is. 0 on the outermost ring (cells with
-    a non-mask neighbour), 1 one ring further in, ... (chamfer distance to the outside minus 1).
-    0 outside the mask. The image border counts as inside, as the object may continue beyond it."""
-    d = (distance_to(~mask) - 1.0).clamp(min=0)
-    return torch.where(mask, d, torch.zeros_like(d))
-
-
-def erode(mask: torch.Tensor, px: int) -> torch.Tensor:
-    """mask [S, S] bool -> cells farther than `px` (8-neighbour / Chebyshev) from any non-mask cell."""
-    m = mask
-    for _ in range(px):
-        inv = (~m)[None, None].float()
-        m = F.max_pool2d(inv, 3, 1, 1)[0, 0] == 0
-    return m
 
 
 def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Tensor:
