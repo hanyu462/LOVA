@@ -31,7 +31,8 @@ def unit_test():
     px, py = int((x + 0.5) / 4 - 0.5), int((y + 0.5) / 4 - 0.5)
     assert float(ts.r_gt[py, px]) > 0.9
     valid_r = torch.nn.functional.avg_pool2d(ts.valid[None, None].float(), 4)[0, 0] > 0.5
-    assert float(ts.r_gt[~valid_r].max()) == 0.0 and (~valid_r).any(), "padding rows carry no R target"
+    assert torch.equal(ts.r_valid, valid_r) and (~valid_r).any(), "r_valid marks the padding cells to ignore"
+    assert float(ts.r_gt[~ts.r_valid].max()) == 0.0, "padding rows carry no R target"
     # reproducible with the same generator
     ts2 = build(s, 3, cfg, torch.Generator().manual_seed(0))
     assert torch.equal(ts.pointer, ts2.pointer) and torch.equal(ts.r_gt, ts2.r_gt) and torch.equal(ts.seg_gt.pos_index, ts2.seg_gt.pos_index)
@@ -42,7 +43,20 @@ def unit_test():
     assert batch["image"].shape == (3, 3, S, S) and batch["r_gt"].shape == (3, S // 4, S // 4)
     assert batch["heat"].shape == (3, 3, S // 8, S // 8) and batch["pointer"].shape == (3, 2)
     assert len(batch["masks_s4"]) == 3 and len(batch["pos_index"]) == 3 and len(batch["image_id"]) == 3
-    assert collate([None, ts])["image"].shape[0] == 1
+    assert batch["r_valid"].shape == (3, S // 4, S // 4)
+    for bad in ([], [None, ts]):
+        try:
+            collate(bad)
+            raise AssertionError("collate must reject empty / None")
+        except AssertionError as e:
+            assert "TrainingSamples only" in str(e)
+    # stride validation
+    from lova.data.common.make_r_gt import RgtCfg
+    try:
+        build(s, 3, PipelineCfg(transform=TransformCfg(size=256, train=False), r_gt=RgtCfg(stride=2), r_stride=3))
+        raise AssertionError("bad stride must raise")
+    except ValueError:
+        pass
     print("build unit test OK")
 
 

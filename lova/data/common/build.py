@@ -8,15 +8,18 @@
 
 Two independent branches share the Transformed sample: the R branch (select / pointer / R_GT)
 and the segmentation branch (SegGT from every visible instance). A sample without a pointer
-candidate, or whose candidates have no owned pixel, returns None; the Dataset skips to another
-image (it is not a segmentation-only sample: V0 trains on pointed samples only).
+candidate, or whose candidates have no owned pixel, returns None. Handling None is the Dataset's
+job (it retries another image and always returns a TrainingSample); collate() takes only
+TrainingSamples, so a batch is never silently smaller than requested.
 
 TrainingSample fields and where they go:
     image        [3, S, S] float      model input
     valid        [S, S] bool          padding mask (losses, R stats)
     pointer      (x, y) px            R predictor input
     pointed_idx  int                  which instance was pointed at (evaluation: pointer gain)
-    r_gt         [S/4, S/4] float     R predictor target (0 on padding)
+    r_gt         [S/4, S/4] float     R predictor target (also zeroed on padding, for display / safety)
+    r_valid      [S/4, S/4] bool      cells that take part in the R loss: padding is IGNORED, not a 0 target
+                                      L_R = sum(r_valid * l(R_pred, R_GT)) / sum(r_valid)
     seg_gt       SegGT                heat / heat_valid / pos_index / pos_inst / masks_s4 / mask_valid
     labels, ann_ids, image_id, params, orig_size      bookkeeping (evaluation maps back to COCO)
 
@@ -54,6 +57,7 @@ class TrainingSample:
     pointer: torch.Tensor        # [2] float (x, y) canvas px
     pointed_idx: int
     r_gt: torch.Tensor           # [S/r_stride, S/r_stride]
+    r_valid: torch.Tensor        # [S/r_stride, S/r_stride] bool
     seg_gt: SegGT
     labels: torch.Tensor         # [N]
     ann_ids: list[int]
@@ -64,35 +68,39 @@ class TrainingSample:
 
 def build(sample: Sample, num_classes: int, cfg: PipelineCfg = PipelineCfg(),
           generator: torch.Generator | None = None) -> TrainingSample | None:
+    if cfg.r_stride < cfg.r_gt.stride or cfg.r_stride % cfg.r_gt.stride:
+        raise ValueError(f"r_stride {cfg.r_stride} must be a multiple of the R_GT geometry stride {cfg.r_gt.stride}")
     t = transform(sample, cfg.transform, generator)
-    # the two full-resolution passes every branch needs, done once: stride-4 area masks and the owner map
+    # full-resolution passes shared by the branches, each done once and only when needed
     masks_s4 = torch.nn.functional.avg_pool2d(t.masks[:, None].float(), cfg.seg_gt.stride_mask)[:, 0]
-    owners = owner_map(t.masks)
     cands = select(t, cfg.select, masks_s4)
     if not cands:
         return None
+    owners = owner_map(t.masks)                                                  # after select: skipped for samples without candidates
     picked = make_pointer(t, cands, cfg.pointer, generator, owners)
     if picked is None:
         return None
     idx, ptr = picked
     r = make_r_gt(t.masks[idx], ptr, cfg.r_gt)                                   # geometry stride
     r = to_supervision(r, cfg.r_stride // cfg.r_gt.stride)                       # -> r_stride
-    valid_r = torch.nn.functional.avg_pool2d(t.valid[None, None].float(), cfg.r_stride)[0, 0] > 0.5
-    r = r * valid_r                                                              # no target on padding
+    r_valid = torch.nn.functional.avg_pool2d(t.valid[None, None].float(), cfg.r_stride)[0, 0] > 0.5
+    r = r * r_valid                                                              # display / safety; the loss uses r_valid
     seg = make_seg_gt(t, num_classes, cfg.seg_gt, generator, masks_s4, owners)
-    return TrainingSample(t.image, t.valid, torch.tensor(ptr, dtype=torch.float32), idx, r, seg,
+    return TrainingSample(t.image, t.valid, torch.tensor(ptr, dtype=torch.float32), idx, r, r_valid, seg,
                           t.labels, t.ann_ids, t.image_id, t.params, t.orig_size)
 
 
 def collate(samples: list[TrainingSample]) -> dict:
     """List of TrainingSample -> batch dict. Fixed-size tensors are stacked, variable-length ones
-    (per-image instance lists) stay as lists indexed by batch position."""
-    samples = [s for s in samples if s is not None]
+    (per-image instance lists) stay as lists indexed by batch position. No None filtering here:
+    the Dataset guarantees every element is a TrainingSample."""
+    assert len(samples) > 0 and all(s is not None for s in samples), "collate takes TrainingSamples only"
     return {
         "image": torch.stack([s.image for s in samples]),
         "valid": torch.stack([s.valid for s in samples]),
         "pointer": torch.stack([s.pointer for s in samples]),
         "r_gt": torch.stack([s.r_gt for s in samples]),
+        "r_valid": torch.stack([s.r_valid for s in samples]),
         "heat": torch.stack([s.seg_gt.heat for s in samples]),
         "heat_valid": torch.stack([s.seg_gt.heat_valid for s in samples]),
         "mask_valid": torch.stack([s.seg_gt.mask_valid for s in samples]),
