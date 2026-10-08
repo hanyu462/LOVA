@@ -60,6 +60,12 @@ def unit_test():
     assert safe_region(circ, PointerCfg(alpha=0.5, depth_stride=1, erode_px=0)).sum() < safe.sum()
     tiny = safe_region(circ, PointerCfg(alpha=0.01, depth_stride=1, erode_px=0))
     assert not bool((tiny & (depth(circ) == 0) & circ).any())
+    # mask covering the whole canvas: no outside cell -> whole mask is safe for any alpha (no 0 * inf)
+    full = torch.ones(S, S, dtype=torch.bool)
+    for alpha in (0.0, 0.1, 0.5):
+        got = safe_region(full, PointerCfg(alpha=alpha, depth_stride=4, erode_px=0))
+        assert torch.equal(got, full), alpha
+    assert torch.equal(safe_region(full, PointerCfg()), full), "erosion does not see the canvas border either"
     # small object at stride 4 (max depth < 10 cells): the boundary ring is still excluded
     small_disc = (yy - 64) ** 2 + (xx - 64) ** 2 < 14 ** 2       # radius 14 px = 3.5 cells
     s_small = safe_region(small_disc, PointerCfg(alpha=0.1, depth_stride=4))

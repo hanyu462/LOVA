@@ -44,7 +44,7 @@ from .transform import Transformed
 class PointerCfg:
     alpha: float = 0.1        # safe interior: depth >= alpha * max depth of the object
     depth_stride: int = 4     # resolution at which the depth map is computed
-    erode_px: int = 2         # additionally keep >= erode_px + 1 px from the TRUE (full-res) boundary
+    erode_px: int = 2         # require Chebyshev distance >= erode_px + 1 from any non-mask pixel (full res)
 
 
 _SHIFTS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
@@ -108,7 +108,12 @@ def safe_region(mask: torch.Tensor, cfg: PointerCfg = PointerCfg()) -> torch.Ten
         return torch.zeros_like(mask)
     d = depth(small)
     dmax = d.max()
-    safe_small = small & (d >= cfg.alpha * dmax) & ((d >= 1) if (cfg.alpha > 0 and dmax >= 1) else small)
+    if not torch.isfinite(dmax):
+        # no outside cell at all in the coarse mask: the canvas border is not a boundary by
+        # convention (the object may continue), so there is no ring to exclude
+        safe_small = small
+    else:
+        safe_small = small & (d >= cfg.alpha * dmax) & ((d >= 1) if (cfg.alpha > 0 and dmax >= 1) else small)
     if st > 1:
         safe = F.interpolate(safe_small[None, None].float(), size=(S, S), mode="nearest")[0, 0] > 0.5
     else:
