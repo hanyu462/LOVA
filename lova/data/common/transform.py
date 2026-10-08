@@ -31,7 +31,7 @@ STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 @dataclass(frozen=True)
 class TransformCfg:
-    size: int = 512                   # output canvas S x S
+    size: int = 640                   # output canvas S x S (COCO native longest side; 32 * 20)
     train: bool = True                # False -> no random scale / flip / crop
     scale_range: tuple = (0.6, 1.25)  # multiplier on "longest side = size"
     flip_prob: float = 0.5

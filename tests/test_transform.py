@@ -114,7 +114,7 @@ def main():
     p.add_argument("--split", default="val2017")
     p.add_argument("--image-id", type=int, default=None)
     p.add_argument("--index", type=int, default=0)
-    p.add_argument("--size", type=int, default=512)
+    p.add_argument("--size", type=int, default=640)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval", action="store_true", help="deterministic transform (resize + pad only)")
     p.add_argument("--out", default=None, help="save PNG here instead of opening a window")
