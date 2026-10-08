@@ -23,9 +23,9 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.pointer import PointerCfg, depth, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
-from lova.data.common.make_rgt import (RgtCfg, downsample_mask, geodesic_from_pointer, inside_profile,  # noqa: E402
-                                       make_r_in, make_rgt, outside_profile, pointer_to_stride, seed_cell,
-                                       to_supervision)
+from lova.data.common.make_rgt import (RgtCfg, downsample_mask, field_stats, geodesic_from_pointer,  # noqa: E402
+                                       inside_profile, make_r_in, make_rgt, outside_profile, pointer_to_stride,
+                                       radial_profile, seed_cell, soft_mask, to_supervision)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
 from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
@@ -104,6 +104,31 @@ def unit_test():
     r4 = to_supervision(r2, 2)
     assert r4.shape == (32, 32) and abs(float(r4[0, 0]) - float(r2[0:2, 0:2].mean())) < 1e-6
     assert torch.equal(to_supervision(r2, 1), r2)
+
+    # ---- B radial / C radial_bias ----
+    cb = RgtCfg(mode="radial", stride=1, gamma=2.0, sigma_frac=1.0)
+    rB = make_rgt(m, (27, 30), cb)
+    assert rB.shape == (S, S) and rB[30, 27] == 1.0
+    # same Euclidean distance -> same value, inside or outside the mask
+    assert abs(float(rB[30, 27 + 20]) - float(rB[30 + 20, 27])) < 1e-5
+    # far arm is close in Euclidean terms -> HIGH under B (the opposite of A)
+    assert float(rB[25, 102]) > float(rB[105, 27]) * 0.5 and float(rB[25, 102]) > 0.3
+    # farthest mask cell = exp(-1) at sigma_frac 1; sigma_frac 1.25 lifts it above 0.5
+    ys, xs = torch.nonzero(m, as_tuple=True)
+    far = ((ys - 30.0) ** 2 + (xs - 27.0) ** 2).argmax()
+    assert abs(float(rB[ys[far], xs[far]]) - math_exp(-1)) < 1e-3
+    rB2 = make_rgt(m, (27, 30), RgtCfg(mode="radial", stride=1, sigma_frac=1.25))
+    assert float(rB2[ys[far], xs[far]]) > 0.5
+    # C: soft mask is exactly 1 deep inside, 0 far outside, ramps across the band
+    Sm = soft_mask(m, 3)
+    assert Sm[60, 27] == 1.0 and Sm[60, 60] == 0.0 and 0 < float(Sm[20, 27]) < 1
+    cc = RgtCfg(mode="radial_bias", stride=1, sigma_frac=1.0, eta=0.3, band_px=3)
+    rC = make_rgt(m, (27, 30), cc)
+    assert rC[30, 27] == 1.0, "safe-interior pointer keeps R(p) = 1"
+    assert abs(float(rC[30 + 20, 27]) - float(rB[30 + 20, 27])) < 1e-5, "inside the mask C == B"
+    assert abs(float(rC[30, 27 + 20]) - 0.3 * float(rB[30, 27 + 20])) < 1e-5, "outside: eta * B"
+    st = field_stats(rC, m, (27.0, 30.0))
+    assert st["r_pointer"] == 1.0 and 0 < st["r_mask_min"] <= st["r_mask_mean"] <= 1 and 0 <= st["area_gt_half"] <= 1
     print("make_rgt unit test OK")
 
 
@@ -126,6 +151,8 @@ def main():
     p.add_argument("--lambda-in-frac", type=float, default=1.0)
     p.add_argument("--lambda-out-px", type=float, default=32.0)
     p.add_argument("--inside-only", action="store_true", help="step 5-1 view: no outside decay")
+    p.add_argument("--compare", action="store_true",
+                   help="A/B/C side by side per pointer: geodesic | radial s1.0 | radial s1.25 | radial_bias s1.25, with stats")
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
@@ -157,6 +184,8 @@ def main():
 
     base = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
     mask_s = downsample_mask(mask, a.stride)
+    if a.compare:
+        return compare_modes(a, t, mask, mask_s, region, base, names[idx], img_id, idx, g)
     bnd = mask_s & (depth(mask_s) == 0)
     rows = []
     for k in range(a.pointers):
@@ -207,6 +236,53 @@ def main():
     else:
         where = "(window)"
         canvas.show(title=f"R_GT {img_id}")
+    print(f"  -> {where}")
+
+
+def compare_modes(a, t, mask, mask_s, region, base, name, img_id, idx, g):
+    S = a.size
+    variants = [("A geodesic", RgtCfg(mode="geodesic", stride=a.stride, gamma=a.gamma)),
+                ("B radial s=1.0", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.0)),
+                ("B radial s=1.25", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.25)),
+                ("C radial_bias s=1.25", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25))]
+    valid_s = downsample_mask(t.valid, a.stride)
+    base_t = torch.from_numpy(np.array(base)).permute(2, 0, 1).float() / 255
+    up = lambda f: torch.nn.functional.interpolate(f[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
+    rows = []
+    print(f"  {'':<10}{'variant':<24}{'R(p)':>6}{'mask min':>10}{'mask mean':>10}{'band32 mean':>12}{'area>0.5':>10}")
+    for k in range(a.pointers):
+        ptr = sample_from(region, g)
+        p_s = pointer_to_stride(ptr, a.stride)
+        panels = [draw_pointer(overlay_masks(base, mask[None], filled=[], labels=[name]), ptr)]
+        titles = [f"pointer {k} ({ptr[0]},{ptr[1]})  {name}"]
+        for label, cfg in variants:
+            r = make_rgt(mask, ptr, cfg) * valid_s
+            st = field_stats(r, mask_s, p_s, valid_s, band_cells=int(32 / a.stride))
+            print(f"  {'ptr ' + str(k):<10}{label:<24}{st['r_pointer']:>6.2f}{st['r_mask_min']:>10.2f}{st['r_mask_mean']:>10.2f}"
+                  f"{st['r_band_mean']:>12.2f}{st['area_gt_half']:>10.3f}")
+            rr = up(r)
+            h = torch.stack([rr, torch.zeros_like(rr), 1 - rr], 0) * 0.7 + base_t * 0.3
+            img = Image.fromarray((h.clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8))
+            above = rr >= 0.5
+            ring = (above & (torch.nn.functional.max_pool2d((~above).float()[None, None], 3, 1, 1)[0, 0] > 0)).numpy()
+            arr = np.asarray(img).copy()
+            arr[ring] = (255, 255, 255)
+            panels.append(draw_pointer(Image.fromarray(arr), ptr))
+            titles.append(label + "  (white = 0.5)")
+        rows.append(hstack(panels, titles))
+    W = max(rw.width for rw in rows)
+    canvas = Image.new("RGB", (W, sum(rw.height for rw in rows) + 6 * len(rows)), (30, 30, 30))
+    y = 0
+    for rw in rows:
+        canvas.paste(rw, (0, y))
+        y += rw.height + 6
+    if a.out:
+        os.makedirs(a.out, exist_ok=True)
+        where = os.path.join(a.out, f"rgt_compare_{img_id}_t{idx}_s{a.seed}.png")
+        canvas.save(where)
+    else:
+        where = "(window)"
+        canvas.show(title=f"R_GT A/B/C {img_id}")
     print(f"  -> {where}")
 
 

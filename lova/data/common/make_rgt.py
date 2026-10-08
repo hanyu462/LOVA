@@ -2,7 +2,21 @@
 
     R_GT = make_rgt(mask, pointer, cfg)        [S/stride, S/stride] in [0, 1]
 
-5-1 INSIDE profile (geodesic from the pointer), 5-2 OUTSIDE profile (boundary value carried out).
+Three candidate definitions (RgtCfg.mode), compared side by side in tests/common/test_make_rgt.py:
+
+  "geodesic"     A. object-shape field: 5-1 inside profile along the mask (geodesic from the
+                    pointer) + 5-2 outside decay carrying the boundary value. R follows the object's
+                    topology (far arm of a U is low). Needs iterative propagation.
+  "radial"       B. pointer-centred computational prior, closed form:
+                    R(x) = exp[-(||x - p|| / sigma)^gamma],  sigma = sigma_frac * max_{x in M} ||x - p||
+                    (object- and pointer-relative scale). Same distance -> same R, target or background.
+  "radial_bias"  C. B times a soft target-mask factor  [eta + (1 - eta) * S(x)]:  S = 1 deep inside the
+                    mask, ramps to 0 across a thin boundary band (band_px), 0 outside. Keeps more compute
+                    on the pointed object than on background at equal distance. Safe-interior pointers
+                    have S(p) = 1, so R(p) = 1 still holds.
+
+  Far-point value for B/C: R(d_max) = exp(-(1 / sigma_frac)^gamma); sigma_frac >= 1 / (-ln r_min)^(1/gamma)
+  keeps the whole target above r_min (gamma 2, r_min 0.5 -> 1.20).
 
     d_g(p, x)   geodesic distance from the pointer to x INSIDE the mask (8-neighbour chamfer
                 propagation that may only pass through mask cells; <= 9 % from true Euclidean geodesic)
@@ -42,10 +56,16 @@ import torch.nn.functional as F
 
 @dataclass(frozen=True)
 class RgtCfg:
+    mode: str = "geodesic"      # "geodesic" (A) | "radial" (B) | "radial_bias" (C)
     stride: int = 2             # geometry resolution (canvas / stride)
-    gamma: float = 2.0          # inside exponent: 2 = Gaussian-like plateau around the pointer, 1 = exponential
+    gamma: float = 2.0          # exponent: 2 = Gaussian-like plateau around the pointer, 1 = exponential
+    # A
     lambda_in_frac: float = 1.0 # lambda_in = frac * max geodesic distance from the pointer (object-relative)
     lambda_out_px: float = 32.0 # outside decay length in INPUT pixels (absolute; 0.05 * 640)
+    # B / C
+    sigma_frac: float = 1.0     # sigma = frac * max Euclidean distance from the pointer within the mask
+    eta: float = 0.3            # C: background keeps eta of the radial value at equal distance
+    band_px: float = 6.0        # C: width (input px) of the boundary ramp of the soft mask S
     mask_thr: float = 0.5       # downsampled soft mask -> bool
 
 
@@ -158,10 +178,56 @@ def to_supervision(r: torch.Tensor, factor: int) -> torch.Tensor:
     return r if factor == 1 else F.avg_pool2d(r[None, None], factor)[0, 0]
 
 
+def radial_profile(mask_s: torch.Tensor, p_s: tuple[float, float], cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
+    """B: exp[-(||x - p|| / sigma)^gamma] on the whole canvas, sigma = sigma_frac * max distance from the
+    pointer to a mask cell. p_s in cell coordinates (half-pixel convention)."""
+    h, w = mask_s.shape
+    ys, xs = torch.meshgrid(torch.arange(h, device=mask_s.device, dtype=torch.float32),
+                            torch.arange(w, device=mask_s.device, dtype=torch.float32), indexing="ij")
+    dist = torch.sqrt((xs - p_s[0]) ** 2 + (ys - p_s[1]) ** 2)
+    d_max = dist[mask_s].max() if mask_s.any() else torch.tensor(1.0)
+    sigma = max(cfg.sigma_frac * float(d_max), 1e-6)
+    return torch.exp(-((dist / sigma) ** cfg.gamma))
+
+
+def soft_mask(mask_s: torch.Tensor, band_cells: float) -> torch.Tensor:
+    """S: exactly 1 deeper than band/2 inside, linear ramp to 0 across the boundary band, 0 outside.
+    (box average of the binary mask with kernel ~ band)"""
+    k = max(int(round(band_cells)) | 1, 1)  # odd kernel
+    if k == 1:
+        return mask_s.float()
+    return F.avg_pool2d(mask_s[None, None].float(), k, 1, k // 2, count_include_pad=False)[0, 0]
+
+
 def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
-    """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_GT [S/stride, S/stride] in [0, 1]:
-    inside profile on the mask, outside decay around it, 0 far away."""
+    """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_GT [S/stride, S/stride] in [0, 1]
+    according to cfg.mode (see module docstring)."""
     mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)
-    seed = seed_cell(mask_s, pointer_to_stride(pointer, cfg.stride))
-    r_in = inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
-    return outside_profile(mask_s, r_in, cfg)
+    p_s = pointer_to_stride(pointer, cfg.stride)
+    if cfg.mode == "geodesic":
+        seed = seed_cell(mask_s, p_s)
+        r_in = inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
+        return outside_profile(mask_s, r_in, cfg)
+    if cfg.mode == "radial":
+        return radial_profile(mask_s, p_s, cfg)
+    if cfg.mode == "radial_bias":
+        s_soft = soft_mask(mask_s, cfg.band_px / cfg.stride)
+        return radial_profile(mask_s, p_s, cfg) * (cfg.eta + (1.0 - cfg.eta) * s_soft)
+    raise ValueError(f"mode={cfg.mode!r} (geodesic | radial | radial_bias)")
+
+
+def field_stats(r: torch.Tensor, mask_s: torch.Tensor, p_s: tuple[float, float], valid_s: torch.Tensor | None = None,
+                band_cells: int = 16) -> dict:
+    """The four numbers used to compare definitions: R at the pointer, min / mean on the target mask,
+    mean in the outside band (band_cells wide), fraction of the valid canvas with R > 0.5."""
+    h, w = mask_s.shape
+    cy, cx = min(max(int(round(p_s[1])), 0), h - 1), min(max(int(round(p_s[0])), 0), w - 1)
+    valid_s = torch.ones_like(mask_s) if valid_s is None else valid_s
+    k = 2 * band_cells + 1
+    dil = F.max_pool2d(mask_s[None, None].float(), k, 1, band_cells)[0, 0] > 0
+    band = dil & ~mask_s & valid_s
+    return dict(r_pointer=float(r[cy, cx]),
+                r_mask_min=float(r[mask_s].min()) if mask_s.any() else float("nan"),
+                r_mask_mean=float(r[mask_s].mean()) if mask_s.any() else float("nan"),
+                r_band_mean=float(r[band].mean()) if band.any() else float("nan"),
+                area_gt_half=float(((r > 0.5) & valid_s).sum() / valid_s.sum()))
