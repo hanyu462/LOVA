@@ -63,7 +63,7 @@ class COCOPointerDataset(Dataset):
         ox = random.randint(0, max(nw - self.size, 0)) // 4 * 4 if train else 0
         oy = random.randint(0, max(nh - self.size, 0)) // 4 * 4 if train else 0
 
-        im = torch.from_numpy(np.asarray(img.resize((nw, nh), Image.BILINEAR))).permute(2, 0, 1).float() / 255
+        im = torch.from_numpy(np.array(img.resize((nw, nh), Image.BILINEAR))).permute(2, 0, 1).float() / 255
         im = (im - MEAN) / STD
         m4 = F.interpolate(masks[None], size=(nh // 4, nw // 4), mode="area")[0]
         if flip:
