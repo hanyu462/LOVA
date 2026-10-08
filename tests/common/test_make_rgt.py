@@ -156,7 +156,8 @@ def main():
     p.add_argument("--compare", action="store_true",
                    help="A/B/C side by side per pointer: geodesic | radial s1.0 | radial s1.25 | radial_bias s1.25, with stats")
     p.add_argument("--compare-c", action="store_true",
-                   help="C variants: band 6 / 24 / 48 px at eta 0.3, and eta 0.5 band 24 (sigma_frac 1.25)")
+                   help="C variants at eta 0.3 (sigma_frac 1.25): bands from --bands (default 48,64,96,128)")
+    p.add_argument("--bands", default="48,64,96,128", help="band widths (px) for --compare-c")
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
@@ -246,9 +247,8 @@ def main():
 def compare_modes(a, t, mask, mask_s, region, base, name, img_id, idx, g):
     S = a.size
     if a.compare_c:
-        variants = [(f"C eta0.3 band{b}", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25, eta=0.3, band_px=b))
-                    for b in (6, 24, 48)] + \
-                   [("C eta0.5 band24", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25, eta=0.5, band_px=24))]
+        variants = [(f"C eta0.3 band{b}", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25, eta=0.3, band_px=float(b)))
+                    for b in a.bands.split(",")]
     else:
         variants = [("A geodesic", RgtCfg(mode="geodesic", stride=a.stride, gamma=a.gamma)),
                     ("B radial s=1.0", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.0)),
