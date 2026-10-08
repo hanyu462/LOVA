@@ -2,7 +2,8 @@
 
     python tests/test_load.py                                   # unit test only (no data)
     python tests/test_load.py --root datasets/coco --n 4   # + opens a window per image
-    python tests/test_load.py --root datasets/coco --image-id 139
+    python tests/test_load.py --root datasets/coco --image-id 139   # COCO id (sparse: 139, 285, 632, ...)
+    python tests/test_load.py --root datasets/coco --index 0        # k-th image in sorted id order
     python tests/test_load.py --root datasets/coco --n 4 --out viz/load   # save PNGs instead (headless server)
 
 PNG = original image with every instance mask filled + outlined, label "class ratio";
@@ -99,7 +100,8 @@ def main():
     p.add_argument("--root", default=None)
     p.add_argument("--split", default="val2017")
     p.add_argument("--n", type=int, default=4)
-    p.add_argument("--image-id", type=int, default=None)
+    p.add_argument("--image-id", type=int, default=None, help="COCO image id (ids are sparse, not 0..N)")
+    p.add_argument("--index", type=int, default=None, help="k-th image of the split in sorted id order")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default=None, help="save PNGs here instead of opening a window")
     a = p.parse_args()
@@ -108,8 +110,17 @@ def main():
     if a.root is None:
         return
     cs = open_coco(a.root, a.split)
-    ids = [a.image_id] if a.image_id is not None else \
-        [int(i) for i in np.random.RandomState(a.seed).choice(cs.image_ids(), a.n, replace=False)]
+    all_ids = cs.image_ids()
+    if a.image_id is not None:
+        if a.image_id not in cs.coco.imgs:
+            near = [i for i in all_ids if abs(i - a.image_id) < 500][:6]
+            sys.exit(f"image id {a.image_id} is not in {a.split} (COCO ids are sparse). Nearby valid ids: {near}. "
+                     f"Or use --index k for the k-th image.")
+        ids = [a.image_id]
+    elif a.index is not None:
+        ids = [all_ids[a.index]]
+    else:
+        ids = [int(i) for i in np.random.RandomState(a.seed).choice(all_ids, a.n, replace=False)]
     if a.out:
         os.makedirs(a.out, exist_ok=True)
     for img_id in ids:
