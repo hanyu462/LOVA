@@ -1,6 +1,8 @@
 """Step 5: (target mask, pointer) -> R_GT, the pseudo ground truth for the R predictor.
 
-Step 5-1 (this file so far): the INSIDE profile.
+    R_GT = make_rgt(mask, pointer, cfg)        [S/stride, S/stride] in [0, 1]
+
+5-1 INSIDE profile (geodesic from the pointer), 5-2 OUTSIDE profile (boundary value carried out).
 
     d_g(p, x)   geodesic distance from the pointer to x INSIDE the mask (8-neighbour chamfer
                 propagation that may only pass through mask cells; <= 9 % from true Euclidean geodesic)
@@ -16,8 +18,17 @@ canvas); the pointer is mapped with the half-pixel convention p' = (p + 0.5) / s
 snapped to the nearest mask cell if downsampling left its cell outside. Supervision at stride 4 is
 a later bilinear downsample of the continuous field.
 
-Pure torch on [h, w] tensors (CPU or GPU). Outside the mask R_in is 0 for now; step 5-2 adds the
-outside decay R_out(x) = R_in(b(x)) * exp(-d_out(x) / lambda_out).
+OUTSIDE profile:
+    b(x)        nearest mask cell to the outside cell x (chamfer propagation outward from the mask
+                that carries the R_in value of the cell it came from)
+    d_out(x)    that chamfer distance (cells), minus 0.5 (cell centre -> boundary)
+    R_out(x)    = R_in(b(x)) * exp(-d_out(x) / lambda_out),   lambda_out in pixels (absolute)
+
+    The value is continuous across the boundary (R_out -> R_in(b) as d_out -> 0) and decays much
+    faster outside than inside (lambda_out << lambda_in for all but tiny objects). Cells farther
+    than 6 * lambda_out are 0 (exp(-6) < 0.003), which also bounds the propagation cost.
+
+Pure torch on [h, w] tensors (CPU or GPU).
 """
 from __future__ import annotations
 
@@ -33,6 +44,7 @@ class RgtCfg:
     stride: int = 2             # geometry resolution (canvas / stride)
     gamma: float = 2.0          # inside exponent: 2 = Gaussian-like plateau around the pointer, 1 = exponential
     lambda_in_frac: float = 1.0 # lambda_in = frac * max geodesic distance from the pointer (object-relative)
+    lambda_out_px: float = 32.0 # outside decay length in INPUT pixels (absolute; 0.05 * 640)
     mask_thr: float = 0.5       # downsampled soft mask -> bool
 
 
@@ -106,8 +118,40 @@ def inside_profile(mask_s: torch.Tensor, d_g: torch.Tensor, cfg: RgtCfg = RgtCfg
     return torch.where(finite, r, torch.zeros_like(r))
 
 
+def outside_profile(mask_s: torch.Tensor, r_in: torch.Tensor, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
+    """R_out on cells outside the mask: the R_in value of the nearest mask cell, decayed with
+    exp(-d_out / lambda_out). Returns [h, w] with R_in kept on the mask itself."""
+    inf = float("inf")
+    lam = cfg.lambda_out_px / cfg.stride                      # cells
+    reach = int(math.ceil(6.0 * lam)) + 1                     # beyond this R_out < 0.003 -> 0
+    d = torch.where(mask_s, torch.zeros_like(r_in), torch.full_like(r_in, inf))
+    v = torch.where(mask_s, r_in, torch.zeros_like(r_in))
+    for _ in range(reach):
+        best_d, best_v = d, v
+        for dy, dx, wgt in _SHIFTS:
+            cand = _shift(d, dy, dx, inf) + wgt
+            better = cand < best_d
+            best_v = torch.where(better, _shift(v, dy, dx, 0.0), best_v)
+            best_d = torch.where(better, cand, best_d)
+        if torch.equal(best_d, d):
+            break
+        d, v = best_d, best_v
+    d_out = (d - 0.5).clamp(min=0)                            # cell centre -> boundary
+    r_out = torch.where(torch.isfinite(d_out), v * torch.exp(-d_out / lam), torch.zeros_like(v))
+    return torch.where(mask_s, r_in, r_out)
+
+
 def make_r_in(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
-    """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_in [S/stride, S/stride] float."""
+    """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_in [S/stride, S/stride] (0 outside)."""
     mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)
     seed = seed_cell(mask_s, pointer_to_stride(pointer, cfg.stride))
     return inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
+
+
+def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:
+    """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_GT [S/stride, S/stride] in [0, 1]:
+    inside profile on the mask, outside decay around it, 0 far away."""
+    mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)
+    seed = seed_cell(mask_s, pointer_to_stride(pointer, cfg.stride))
+    r_in = inside_profile(mask_s, geodesic_from_pointer(mask_s, seed), cfg)
+    return outside_profile(mask_s, r_in, cfg)

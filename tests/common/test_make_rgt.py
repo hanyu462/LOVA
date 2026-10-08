@@ -1,14 +1,15 @@
-"""lova.data.common.make_rgt (step 5-1: geodesic + inside profile R_in).
+"""lova.data.common.make_rgt (step 5: geodesic inside profile R_in + outside decay R_out).
 
     python tests/common/test_make_rgt.py                                                  # unit test
     python tests/common/test_make_rgt.py --root datasets/coco --image-id 39769 --seed 5 --pointers 4
     python tests/common/test_make_rgt.py --root datasets/coco --image-id 2153 --seed 0 --pointers 4 --gamma 1.0
 
 Window, one row per pointer on the SAME target instance:
-    [RGB + pointer | target mask | R_in heatmap (red high, blue low) | R_in contours 0.9 / 0.7 / 0.5 / 0.3]
-What to check: R = 1 at the pointer, smooth decrease that follows the object's shape, no value
-outside the mask (step 5-1), and clearly different fields for different pointers.
-Terminal: R along the row through the pointer, and R on the boundary (min / max) per pointer.
+    [RGB + pointer | target mask | R_GT heatmap (red high, blue low) | R_GT contours 0.9 / 0.7 / 0.5 / 0.3]
+What to check: R = 1 at the pointer, smooth decrease that follows the object's shape, continuous
+across the boundary, faster decay outside than inside (thin halo), 0 far away, and clearly
+different fields for different pointers. --inside-only shows step 5-1 alone.
+Terminal: R along the row through the pointer (mask cells marked with |), boundary R min/mean/max.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lova.data.common.pointer import PointerCfg, depth, make_pointer, pointer_region, sample_from, sampling_region  # noqa: E402
 from lova.data.common.make_rgt import (RgtCfg, downsample_mask, geodesic_from_pointer, inside_profile,  # noqa: E402
-                                      make_r_in, pointer_to_stride, seed_cell)
+                                       make_r_in, make_rgt, outside_profile, pointer_to_stride, seed_cell)
 from lova.data.common.select import SelectCfg, select  # noqa: E402
 from lova.data.common.transform import TransformCfg, denormalize, transform  # noqa: E402
 from tests.util.args import add_image_args, resolve_image_id  # noqa: E402
@@ -73,7 +74,28 @@ def unit_test():
     m2[5:10, 60:70] = True
     r2 = make_r_in(m2, (27, 30), RgtCfg(stride=1))
     assert float(r2[5:10, 60:70].max()) == 0.0
-    print("make_rgt (inside) unit test OK")
+    # ---- outside profile ----
+    # disc: R_in = 1 everywhere (pointer-centred small object) -> R_out depends on distance only
+    yy, xx = torch.meshgrid(torch.arange(S), torch.arange(S), indexing="ij")
+    disc = (yy - 64) ** 2 + (xx - 64) ** 2 < 20 ** 2
+    cfg_o = RgtCfg(stride=1, lambda_out_px=4.0)
+    r_full = make_rgt(disc, (64, 64), cfg_o)
+    assert r_full[64, 64] == 1.0 and r_full.shape == (S, S)
+    assert float(r_full[disc].min()) > 0.3                           # inside keeps R_in
+    bval, ring1 = float(r_full[64, 64 + 19]), float(r_full[64, 64 + 20])   # last cell inside, first outside
+    assert 0.8 * bval < ring1 <= bval, (bval, ring1)                   # continuous across the boundary (exp(-0.5/lambda))
+    assert r_full[64, 64 + 28] < r_full[64, 64 + 24] < r_full[64, 64 + 20], "monotone decay outside"
+    assert abs(float(r_full[64, 64 + 28]) / float(r_full[64, 64 + 20]) - math_exp(-8 / 4)) < 0.1, "exp(-d/lambda)"
+    assert float(r_full[64, 64 + 20 + 30]) == 0.0, "zero beyond ~6 lambda"
+    assert float(r_full[0, 0]) == 0.0
+    # boundary value is carried outward: the outside near the pointer side is higher than far side
+    rb = make_rgt(m, (27, 30), RgtCfg(stride=1, lambda_out_px=6.0))
+    assert rb[30, 17] > rb[25, 112] > 0, (float(rb[30, 17]), float(rb[25, 112]))
+    assert torch.equal(outside_profile(m, inside_profile(m, dg, cfg), RgtCfg(stride=1))[m], r[m]), "inside untouched"
+    # stride-2 end to end: shape and range
+    r2 = make_rgt(m, (27, 30), RgtCfg(stride=2))
+    assert r2.shape == (64, 64) and r2.min() >= 0 and r2.max() <= 1
+    print("make_rgt unit test OK")
 
 
 def math_exp(x):
@@ -93,6 +115,8 @@ def main():
     p.add_argument("--stride", type=int, default=2)
     p.add_argument("--gamma", type=float, default=2.0)
     p.add_argument("--lambda-in-frac", type=float, default=1.0)
+    p.add_argument("--lambda-out-px", type=float, default=32.0)
+    p.add_argument("--inside-only", action="store_true", help="step 5-1 view: no outside decay")
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
@@ -117,10 +141,10 @@ def main():
         idx = a.target
     mask = t.masks[idx]
     region = sampling_region(pointer_region(idx, t.masks), PointerCfg())
-    cfg = RgtCfg(stride=a.stride, gamma=a.gamma, lambda_in_frac=a.lambda_in_frac)
+    cfg = RgtCfg(stride=a.stride, gamma=a.gamma, lambda_in_frac=a.lambda_in_frac, lambda_out_px=a.lambda_out_px)
     S = a.size
     print(f"image {img_id}: target {idx} {names[idx]} ({int(mask.sum())} px), stride {a.stride} gamma {a.gamma} "
-          f"lambda_in_frac {a.lambda_in_frac}")
+          f"lambda_in_frac {a.lambda_in_frac} lambda_out_px {a.lambda_out_px}{' inside only' if a.inside_only else ''}")
 
     base = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
     mask_s = downsample_mask(mask, a.stride)
@@ -128,7 +152,7 @@ def main():
     rows = []
     for k in range(a.pointers):
         ptr = sample_from(region, g)
-        r = make_r_in(mask, ptr, cfg)                                   # [S/st, S/st]
+        r = (make_r_in if a.inside_only else make_rgt)(mask, ptr, cfg)  # [S/st, S/st]
         rr = torch.nn.functional.interpolate(r[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
         img_rgb = draw_pointer(base.copy(), ptr)
         img_mask = draw_pointer(overlay_masks(base, mask[None], labels=[names[idx]]), ptr)
@@ -141,7 +165,8 @@ def main():
             cont[(above & touches_below).numpy()] = col
         img_cont = draw_pointer(Image.fromarray(cont), ptr)
         rows.append(hstack([img_rgb, img_mask, img_heat, img_cont],
-                           [f"pointer {k}: ({ptr[0]},{ptr[1]})", f"target: {names[idx]}", "R_in (red 1 -> blue 0)", "contours 0.9 0.7 0.5 0.3"]))
+                           [f"pointer {k}: ({ptr[0]},{ptr[1]})", f"target: {names[idx]}",
+                            f"{'R_in' if a.inside_only else 'R_GT'} (red 1 -> blue 0)", "contours 0.9 0.7 0.5 0.3"]))
         # numbers: profile along the pointer row (stride cells) and boundary range
         px, py = pointer_to_stride(ptr, a.stride)
         row = r[int(round(py))]
@@ -151,7 +176,8 @@ def main():
         print(f"  pointer {k} ({ptr[0]},{ptr[1]})  R(p)={float(r[int(round(py)), cx]):.2f}  boundary R min/mean/max "
               f"{float(rb.min()):.2f}/{float(rb.mean()):.2f}/{float(rb.max()):.2f}")
         print("     x(cells): " + " ".join(f"{x:4d}" for x in xs))
-        print("     R_in    : " + " ".join(f"{float(row[x]):4.2f}" for x in xs))
+        print("     R       : " + " ".join(f"{float(row[x]):4.2f}" for x in xs))
+        print("     in mask : " + " ".join(f"{'   |' if bool(mask_s[int(round(py)), x]) else '    '}" for x in xs))
     W = max(rw.width for rw in rows)
     canvas = Image.new("RGB", (W, sum(rw.height for rw in rows) + 6 * len(rows)), (30, 30, 30))
     y = 0
@@ -160,11 +186,11 @@ def main():
         y += rw.height + 6
     if a.out:
         os.makedirs(a.out, exist_ok=True)
-        where = os.path.join(a.out, f"rin_{img_id}_t{idx}_s{a.seed}.png")
+        where = os.path.join(a.out, f"rgt_{img_id}_t{idx}_s{a.seed}{'_in' if a.inside_only else ''}.png")
         canvas.save(where)
     else:
         where = "(window)"
-        canvas.show(title=f"R_in {img_id}")
+        canvas.show(title=f"R_GT {img_id}")
     print(f"  -> {where}")
 
 
