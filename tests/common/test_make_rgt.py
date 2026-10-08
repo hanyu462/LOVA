@@ -137,6 +137,14 @@ def unit_test():
     rd = make_rgt(m, (27, 30), RgtCfg(stride=1))            # default mode / parameters, full-res for exact indexing
     assert rd[30, 27] == 1.0 and float(rd[m].min()) > 0.5, "whole target above 0.5 with the default sigma_frac"
     assert make_rgt(m, (27, 30)).shape == (64, 64), "default stride 2"
+    # a mask that vanishes at the geometry stride is an error, not a silently wrong field
+    thin = torch.zeros(S, S, dtype=torch.bool)
+    thin[10, 20] = True                     # single pixel -> area average 0.25 < 0.5 at stride 2 (a 1 px line gives 0.5 and survives)
+    try:
+        make_rgt(thin, (20, 10), RgtCfg(stride=2))
+        raise AssertionError("vanished mask must raise")
+    except ValueError:
+        pass
     print("make_rgt unit test OK")
 
 

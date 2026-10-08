@@ -18,8 +18,14 @@ as a soft bias. A stays as the comparison baseline, B as the ablation without th
                     equals B (so R(p) = 1); at equal distance the background keeps eta of the radial value,
                     reached smoothly over the band instead of at the boundary.
 
-  Far-point value for B/C: R(d_max) = exp(-(1 / sigma_frac)^gamma); sigma_frac >= 1 / (-ln r_min)^(1/gamma)
-  keeps the whole target above r_min (gamma 2, r_min 0.5 -> 1.20).
+  Levels of statement (continuous field / geometry grid / supervision grid):
+    * continuous field: R(p) = 1 exactly; on the geometry grid the pointer lies between cell centres,
+      so the maximum cell is ~1 (0.99+), never snapped (snapping would move the field's centre)
+    * geometry grid: every target-mask cell has R >= exp(-(1 / sigma_frac)^gamma) = 0.527 for the
+      defaults (sigma_frac >= 1 / (-ln r_min)^(1/gamma) keeps it above r_min)
+    * supervision grid (stride 4): area averages; boundary-straddling cells may fall below that
+  Outside the band S = 0 but R = eta * R_radial is NOT 0: a low radial tail covers the canvas
+  (LOVA's low R means coarse perception, not "unseen"); eta therefore affects compute directly.
 
     d_g(p, x)   geodesic distance from the pointer to x INSIDE the mask (8-neighbour chamfer
                 propagation that may only pass through mask cells; <= 9 % from true Euclidean geodesic)
@@ -111,8 +117,10 @@ def make_r_in(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tens
 
 
 def to_supervision(r: torch.Tensor, factor: int) -> torch.Tensor:
-    """R_GT at the geometry stride -> the R predictor's stride (area average over factor x factor
-    cells, which for integer factors equals antialiased bilinear downsampling). factor 1 = identity."""
+    """Area-average R_GT from the geometry grid to the predictor grid (factor x factor cells per
+    output cell; factor 1 = identity). Note: a supervision cell straddling the target boundary
+    averages target and background values, so the "target cells >= 0.527" guarantee below holds on
+    the geometry grid, not necessarily on every supervision cell."""
     return r if factor == 1 else F.avg_pool2d(r[None, None], factor)[0, 0]
 
 
@@ -123,8 +131,9 @@ def radial_profile(mask_s: torch.Tensor, p_s: tuple[float, float], cfg: RgtCfg =
     ys, xs = torch.meshgrid(torch.arange(h, device=mask_s.device, dtype=torch.float32),
                             torch.arange(w, device=mask_s.device, dtype=torch.float32), indexing="ij")
     dist = torch.sqrt((xs - p_s[0]) ** 2 + (ys - p_s[1]) ** 2)
-    d_max = dist[mask_s].max() if mask_s.any() else torch.tensor(1.0)
-    sigma = max(cfg.sigma_frac * float(d_max), 1e-6)
+    if not mask_s.any():
+        raise ValueError("radial_profile needs a non-empty mask to set sigma")
+    sigma = max(cfg.sigma_frac * float(dist[mask_s].max()), 1e-6)
     return torch.exp(-((dist / sigma) ** cfg.gamma))
 
 
@@ -141,6 +150,10 @@ def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tenso
     """Full-res mask [S, S] bool + pointer (x, y) in full-res pixels -> R_GT [S/stride, S/stride] in [0, 1]
     according to cfg.mode (see module docstring)."""
     mask_s = downsample_mask(mask, cfg.stride, cfg.mask_thr)
+    if not mask_s.any():
+        # Never seen on COCO val2017 (checked over all candidates, eval + train transforms). Fail loudly
+        # rather than build a field around an arbitrary sigma; decide a fallback only if it ever happens.
+        raise ValueError(f"target mask vanished after downsampling by {cfg.stride} ({int(mask.sum())} px at full res)")
     p_s = pointer_to_stride(pointer, cfg.stride)
     if cfg.mode == "geodesic":
         seed = seed_cell(mask_s, p_s)
