@@ -7,8 +7,10 @@
     p = sigmoid(logit)
     positive (heat == 1):   -(1 - p)^alpha * log p
     negative (heat <  1):   -(1 - heat)^beta * p^alpha * log(1 - p)      shoulders are down-weighted
-    L = (sum_pos + sum_neg) over valid cells / max(N_pos, 1),  N_pos = number of valid cells with heat == 1
-        (cells, not instances: two same-class instances sharing a centre cell count once, as in CenterNet)
+    L = (sum_pos + sum_neg) over valid cells / max(N_pos, 1)
+        N_pos = number of valid positive LOCATIONS in the class heatmap [B, K, H, W]: a person centre and a
+        dog centre on the same cell count twice (different channels); two same-class instances sharing a
+        centre cell were merged by max in the GT and count once (as in CenterNet)
 
 Computed in float32 with logsigmoid for numerical safety under autocast.
 """
