@@ -10,10 +10,10 @@ Three candidate definitions (RgtCfg.mode), compared side by side in tests/common
   "radial"       B. pointer-centred computational prior, closed form:
                     R(x) = exp[-(||x - p|| / sigma)^gamma],  sigma = sigma_frac * max_{x in M} ||x - p||
                     (object- and pointer-relative scale). Same distance -> same R, target or background.
-  "radial_bias"  C. B times a soft target-mask factor  [eta + (1 - eta) * S(x)]:  S = 1 deep inside the
-                    mask, ramps to 0 across a thin boundary band (band_px), 0 outside. Keeps more compute
-                    on the pointed object than on background at equal distance. Safe-interior pointers
-                    have S(p) = 1, so R(p) = 1 still holds.
+  "radial_bias"  C. B times a soft target-mask factor  [eta + (1 - eta) * S(x)]:  S = 1 on the whole mask,
+                    ramps linearly to 0 over a band of band_px OUTSIDE the mask, 0 beyond. On the object C
+                    equals B (so R(p) = 1); at equal distance the background keeps eta of the radial value,
+                    reached smoothly over the band instead of at the boundary.
 
   Far-point value for B/C: R(d_max) = exp(-(1 / sigma_frac)^gamma); sigma_frac >= 1 / (-ln r_min)^(1/gamma)
   keeps the whole target above r_min (gamma 2, r_min 0.5 -> 1.20).
@@ -53,6 +53,10 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from .geometry import SHIFTS as _SHIFTS
+from .geometry import distance_to
+from .geometry import shift as _shift
+
 
 @dataclass(frozen=True)
 class RgtCfg:
@@ -65,22 +69,8 @@ class RgtCfg:
     # B / C
     sigma_frac: float = 1.0     # sigma = frac * max Euclidean distance from the pointer within the mask
     eta: float = 0.3            # C: background keeps eta of the radial value at equal distance
-    band_px: float = 6.0        # C: width (input px) of the boundary ramp of the soft mask S
+    band_px: float = 24.0       # C: width (input px) of the ramp 1 -> 0 OUTSIDE the mask
     mask_thr: float = 0.5       # downsampled soft mask -> bool
-
-
-_SHIFTS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-           (-1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (1, 1, math.sqrt(2))]
-
-
-def _shift(x: torch.Tensor, dy: int, dx: int, fill: float) -> torch.Tensor:
-    """out[y, x] = x[y - dy, x - dx], `fill` outside. x [h, w]."""
-    h, w = x.shape
-    out = torch.full_like(x, fill)
-    ys, yd = (slice(0, h - dy), slice(dy, h)) if dy >= 0 else (slice(-dy, h), slice(0, h + dy))
-    xs, xd = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
-    out[yd, xd] = x[ys, xs]
-    return out
 
 
 def downsample_mask(mask: torch.Tensor, stride: int, thr: float = 0.5) -> torch.Tensor:
@@ -191,12 +181,12 @@ def radial_profile(mask_s: torch.Tensor, p_s: tuple[float, float], cfg: RgtCfg =
 
 
 def soft_mask(mask_s: torch.Tensor, band_cells: float) -> torch.Tensor:
-    """S: exactly 1 deeper than band/2 inside, linear ramp to 0 across the boundary band, 0 outside.
-    (box average of the binary mask with kernel ~ band)"""
-    k = max(int(round(band_cells)) | 1, 1)  # odd kernel
-    if k == 1:
+    """S: exactly 1 on the mask, linear ramp 1 -> 0 over `band_cells` outside it, 0 beyond."""
+    if band_cells <= 0:
         return mask_s.float()
-    return F.avg_pool2d(mask_s[None, None].float(), k, 1, k // 2, count_include_pad=False)[0, 0]
+    d = distance_to(mask_s, max_iter=int(math.ceil(band_cells)) + 1)   # cells to the mask (0 on it)
+    d = torch.where(torch.isfinite(d), d, torch.full_like(d, band_cells + 1))
+    return (1.0 - (d - 0.5).clamp(min=0) / band_cells).clamp(0, 1)
 
 
 def make_rgt(mask: torch.Tensor, pointer, cfg: RgtCfg = RgtCfg()) -> torch.Tensor:

@@ -31,12 +31,12 @@ Returns pointer coordinates (x, y) in canvas pixels (ints).
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
+from .geometry import distance_to
 from .transform import Transformed
 
 
@@ -45,35 +45,6 @@ class PointerCfg:
     alpha: float = 0.1        # safe interior: depth >= alpha * max depth of the object
     depth_stride: int = 4     # resolution at which the depth map is computed
     erode_px: int = 2         # require Chebyshev distance >= erode_px + 1 from any non-mask pixel (full res)
-
-
-_SHIFTS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-           (-1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (1, 1, math.sqrt(2))]
-
-
-def _shift(x: torch.Tensor, dy: int, dx: int, fill: float) -> torch.Tensor:
-    """out[y, x] = x[y - dy, x - dx], `fill` outside. x [h, w]."""
-    h, w = x.shape
-    out = torch.full_like(x, fill)
-    ys, yd = (slice(0, h - dy), slice(dy, h)) if dy >= 0 else (slice(-dy, h), slice(0, h + dy))
-    xs, xd = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
-    out[yd, xd] = x[ys, xs]
-    return out
-
-
-def distance_to(target: torch.Tensor, max_iter: int = 4096) -> torch.Tensor:
-    """target [h, w] bool -> [h, w] float: chamfer distance (cells) from every cell to the nearest
-    TRUE cell (0 on TRUE cells, +inf if target is empty). Converges in <= max distance iterations."""
-    inf = float("inf")
-    d = torch.where(target, torch.zeros_like(target, dtype=torch.float32), torch.full_like(target, inf, dtype=torch.float32))
-    for _ in range(max_iter):
-        best = d
-        for dy, dx, wgt in _SHIFTS:
-            best = torch.minimum(best, _shift(d, dy, dx, inf) + wgt)
-        if torch.equal(best, d):
-            return d
-        d = best
-    return d
 
 
 def depth(mask: torch.Tensor) -> torch.Tensor:

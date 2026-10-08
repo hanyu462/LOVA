@@ -119,14 +119,16 @@ def unit_test():
     assert abs(float(rB[ys[far], xs[far]]) - math_exp(-1)) < 1e-3
     rB2 = make_rgt(m, (27, 30), RgtCfg(mode="radial", stride=1, sigma_frac=1.25))
     assert float(rB2[ys[far], xs[far]]) > 0.5
-    # C: soft mask is exactly 1 deep inside, 0 far outside, ramps across the band
-    Sm = soft_mask(m, 3)
-    assert Sm[60, 27] == 1.0 and Sm[60, 60] == 0.0 and 0 < float(Sm[20, 27]) < 1
-    cc = RgtCfg(mode="radial_bias", stride=1, sigma_frac=1.0, eta=0.3, band_px=3)
+    # C: soft mask is exactly 1 on the mask (boundary included), ramps 1 -> 0 outside over the band, 0 beyond
+    Sm = soft_mask(m, 6)
+    assert bool(Sm[m].min() == 1.0) and Sm[60, 60] == 0.0
+    assert 0 < float(Sm[30, 18]) < 1 and float(Sm[30, 17]) < float(Sm[30, 18]), "ramp just outside the left arm"
+    cc = RgtCfg(mode="radial_bias", stride=1, sigma_frac=1.0, eta=0.3, band_px=6)
     rC = make_rgt(m, (27, 30), cc)
-    assert rC[30, 27] == 1.0, "safe-interior pointer keeps R(p) = 1"
-    assert abs(float(rC[30 + 20, 27]) - float(rB[30 + 20, 27])) < 1e-5, "inside the mask C == B"
-    assert abs(float(rC[30, 27 + 20]) - 0.3 * float(rB[30, 27 + 20])) < 1e-5, "outside: eta * B"
+    assert rC[30, 27] == 1.0, "R(p) = 1"
+    assert torch.allclose(rC[m], rB[m]), "on the mask C == B"
+    assert abs(float(rC[30, 27 + 40]) - 0.3 * float(rB[30, 27 + 40])) < 1e-5, "beyond the band: eta * B"
+    assert float(rC[30, 17]) > 0.3 * float(rB[30, 17]), "inside the band: between B and eta * B"
     st = field_stats(rC, m, (27.0, 30.0))
     assert st["r_pointer"] == 1.0 and 0 < st["r_mask_min"] <= st["r_mask_mean"] <= 1 and 0 <= st["area_gt_half"] <= 1
     print("make_rgt unit test OK")
@@ -153,6 +155,8 @@ def main():
     p.add_argument("--inside-only", action="store_true", help="step 5-1 view: no outside decay")
     p.add_argument("--compare", action="store_true",
                    help="A/B/C side by side per pointer: geodesic | radial s1.0 | radial s1.25 | radial_bias s1.25, with stats")
+    p.add_argument("--compare-c", action="store_true",
+                   help="C variants: band 6 / 24 / 48 px at eta 0.3, and eta 0.5 band 24 (sigma_frac 1.25)")
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
@@ -184,7 +188,7 @@ def main():
 
     base = Image.fromarray((denormalize(t.image) * 255).permute(1, 2, 0).numpy().astype(np.uint8))
     mask_s = downsample_mask(mask, a.stride)
-    if a.compare:
+    if a.compare or a.compare_c:
         return compare_modes(a, t, mask, mask_s, region, base, names[idx], img_id, idx, g)
     bnd = mask_s & (depth(mask_s) == 0)
     rows = []
@@ -241,10 +245,15 @@ def main():
 
 def compare_modes(a, t, mask, mask_s, region, base, name, img_id, idx, g):
     S = a.size
-    variants = [("A geodesic", RgtCfg(mode="geodesic", stride=a.stride, gamma=a.gamma)),
-                ("B radial s=1.0", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.0)),
-                ("B radial s=1.25", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.25)),
-                ("C radial_bias s=1.25", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25))]
+    if a.compare_c:
+        variants = [(f"C eta0.3 band{b}", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25, eta=0.3, band_px=b))
+                    for b in (6, 24, 48)] + \
+                   [("C eta0.5 band24", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25, eta=0.5, band_px=24))]
+    else:
+        variants = [("A geodesic", RgtCfg(mode="geodesic", stride=a.stride, gamma=a.gamma)),
+                    ("B radial s=1.0", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.0)),
+                    ("B radial s=1.25", RgtCfg(mode="radial", stride=a.stride, gamma=a.gamma, sigma_frac=1.25)),
+                    ("C radial_bias s=1.25", RgtCfg(mode="radial_bias", stride=a.stride, gamma=a.gamma, sigma_frac=1.25))]
     valid_s = downsample_mask(t.valid, a.stride)
     base_t = torch.from_numpy(np.array(base)).permute(2, 0, 1).float() / 255
     up = lambda f: torch.nn.functional.interpolate(f[None, None], size=(S, S), mode="bilinear", align_corners=False)[0, 0]
@@ -278,7 +287,7 @@ def compare_modes(a, t, mask, mask_s, region, base, name, img_id, idx, g):
         y += rw.height + 6
     if a.out:
         os.makedirs(a.out, exist_ok=True)
-        where = os.path.join(a.out, f"rgt_compare_{img_id}_t{idx}_s{a.seed}.png")
+        where = os.path.join(a.out, f"rgt_compare{'C' if a.compare_c else ''}_{img_id}_t{idx}_s{a.seed}.png")
         canvas.save(where)
     else:
         where = "(window)"
