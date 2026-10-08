@@ -1,7 +1,7 @@
 """Step 1: pick the instances that are large enough to be pointer targets.
 
     ratio = mask area / image area   (both in original-image pixels)
-    keep  = ratio >= min_area_ratio  and  not iscrowd
+    keep  = ratio >= threshold  and  not iscrowd
 
 Used by the training dataset to decide which instances may be pointed at. Every instance
 (kept or not) still remains a segmentation target; this only restricts the POINTER targets.
@@ -37,20 +37,20 @@ def instance_ratios(coco, img_id: int, area_from: str = "annotation") -> list[In
     return sorted(out, key=lambda x: x.ratio, reverse=True)
 
 
-def select_instances(coco, img_id: int, min_area_ratio: float, area_from: str = "annotation") -> list[Instance]:
-    """Instances with area ratio >= min_area_ratio (largest first). Empty list = image has no pointer target."""
-    return [x for x in instance_ratios(coco, img_id, area_from) if x.ratio >= min_area_ratio]
+def select_instances(coco, img_id: int, threshold: float, area_from: str = "annotation") -> list[Instance]:
+    """Instances with area ratio >= threshold (largest first). Empty list = image has no pointer target."""
+    return [x for x in instance_ratios(coco, img_id, area_from) if x.ratio >= threshold]
 
 
-def selection_stats(coco, min_area_ratio: float, img_ids=None) -> dict:
+def selection_stats(coco, threshold: float, img_ids=None) -> dict:
     """How much of the dataset survives the threshold (annotation areas, so this is fast)."""
     img_ids = list(img_ids) if img_ids is not None else coco.getImgIds()
     n_inst = n_keep = n_img_keep = 0
     for i in img_ids:
         inst = instance_ratios(coco, i)
-        k = sum(x.ratio >= min_area_ratio for x in inst)
+        k = sum(x.ratio >= threshold for x in inst)
         n_inst += len(inst)
         n_keep += k
         n_img_keep += k > 0
-    return dict(min_area_ratio=min_area_ratio, images=len(img_ids), images_with_target=n_img_keep,
+    return dict(threshold=threshold, images=len(img_ids), images_with_target=n_img_keep,
                 instances=n_inst, instances_kept=n_keep)

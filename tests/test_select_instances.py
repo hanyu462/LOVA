@@ -3,9 +3,9 @@
 Unit test (no data needed):
     python tests/test_select_instances.py
 List selected instances on real COCO:
-    python tests/test_select_instances.py --coco-root datasets/coco --min-area-ratio 0.02 --n 5
-    python tests/test_select_instances.py --coco-root datasets/coco --min-area-ratio 0.02 --image-id 139
-    python tests/test_select_instances.py --coco-root datasets/coco --min-area-ratio 0.02 --stats
+    python tests/test_select_instances.py --coco-root datasets/coco --threshold 0.02 --n 5
+    python tests/test_select_instances.py --coco-root datasets/coco --threshold 0.02 --image-id 139
+    python tests/test_select_instances.py --coco-root datasets/coco --threshold 0.02 --stats
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def unit_test():
     exact = instance_ratios(c, 1, area_from="mask")
     assert abs(exact[0].ratio - 0.5) < 0.01, "rasterised area close to polygon area"
     st = selection_stats(c, 0.01)
-    assert st == dict(min_area_ratio=0.01, images=1, images_with_target=1, instances=3, instances_kept=2)
+    assert st == dict(threshold=0.01, images=1, images_with_target=1, instances=3, instances_kept=2)
     print("select_instances unit test OK")
 
 
@@ -59,7 +59,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--coco-root", default=None)
     p.add_argument("--split", default="val2017")
-    p.add_argument("--min-area-ratio", type=float, default=0.02)
+    p.add_argument("--threshold", type=float, default=0.02)
     p.add_argument("--n", type=int, default=5, help="first N images to list")
     p.add_argument("--image-id", type=int, default=None)
     p.add_argument("--area-from", choices=["annotation", "mask"], default="annotation")
@@ -77,14 +77,14 @@ def main():
     for img_id in ids:
         info = coco.loadImgs(img_id)[0]
         allr = instance_ratios(coco, img_id, a.area_from)
-        kept = {x.ann_id for x in select_instances(coco, img_id, a.min_area_ratio, a.area_from)}
-        print(f"\nimage {img_id} ({info['width']}x{info['height']}): {len(kept)}/{len(allr)} instances >= {a.min_area_ratio}")
+        kept = {x.ann_id for x in select_instances(coco, img_id, a.threshold, a.area_from)}
+        print(f"\nimage {img_id} ({info['width']}x{info['height']}): {len(kept)}/{len(allr)} instances >= {a.threshold}")
         print(f"  {'keep':<5}{'ann_id':>8}  {'class':<14}{'ratio':>8}{'area_px':>10}  bbox")
         for x in allr:
             print(f"  {'*' if x.ann_id in kept else '':<5}{x.ann_id:>8}  {names[x.category_id]:<14}{x.ratio:>8.4f}{x.area:>10.0f}  "
                   f"({x.bbox[0]:.0f},{x.bbox[1]:.0f},{x.bbox[2]:.0f},{x.bbox[3]:.0f})")
     if a.stats:
-        print("\n" + str(selection_stats(coco, a.min_area_ratio)))
+        print("\n" + str(selection_stats(coco, a.threshold)))
 
 
 if __name__ == "__main__":
