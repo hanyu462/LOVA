@@ -11,6 +11,8 @@
         on a normal end (total_steps or a deliberate stop_at): one forced checkpoint so that last.pt
         AND the numbered file both hold the final update, whatever the cadences (never on an
         exception: the periodic last.pt is the safe point then)
+        every val_every updates and at total_steps: fast deterministic validation (validate.py) on a
+        fixed (image, pointer) set, printed and appended to out/val.jsonl with the update number
 
 resume: None -> fresh run (refused if `out` already holds any run artifact: meta.json, train.jsonl or a
 checkpoint, so an old run is never silently continued or overwritten); True -> out/last.pt (must
@@ -44,7 +46,8 @@ from ..models.lova import Lova, LovaCfg
 from .checkpoint import LAST, Checkpointer, CkptCfg, latest, load_checkpoint, to_meta
 from .logger import LogCfg, TrainLogger
 from .optim import OptimCfg, SchedCfg, build_optimizer, build_scheduler
-from .train import TrainCfg, make_scaler, train_step
+from .train import TrainCfg, amp_dtype, make_scaler, train_step
+from .validate import ValCfg, ValSet, format_val, val_loader, validate
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,9 @@ class RunCfg:
     ckpt_every: int = 2000
     ckpt_keep: int = 3
     ckpt_every_last: int = 200
+    val_every: int = 2000          # 0 = no validation during training
+    val: ValCfg = field(default_factory=ValCfg)
+    val_split: str = "val2017"
 
 
 def run_meta(cfg: RunCfg, num_classes: int) -> dict:
@@ -115,6 +121,7 @@ def fit(cfg: RunCfg, root: str | None, out: str, resume: bool | str | None = Non
     os.makedirs(out, exist_ok=True)
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
+    loader_is_coco = loader is None
     if loader is None:
         loader, num_classes = build_loader(cfg, root, device)
     elif num_classes is None:
@@ -132,6 +139,18 @@ def fit(cfg: RunCfg, root: str | None, out: str, resume: bool | str | None = Non
         with open(os.path.join(out, "meta.json"), "w") as f:
             json.dump(meta, f, indent=1)
     logger = TrainLogger(LogCfg(cfg.log_every, cfg.log_window, os.path.join(out, "train.jsonl")))
+    vloader = None
+    if cfg.val_every > 0 and loader_is_coco:
+        vloader = val_loader(ValSet(root, cfg.val_split, cfg.data, cfg.val.n_images, cfg.val.seed), cfg.val)
+
+    def run_val(u: int) -> None:
+        if vloader is None:
+            return
+        res = validate(model, vloader, cfg.loss, amp_dtype=amp_dtype(cfg.train))
+        print(format_val(res, u), flush=True)
+        with open(os.path.join(out, "val.jsonl"), "a") as f:
+            f.write(json.dumps({"update": u, **res}) + "\n")
+
     checkpointer = Checkpointer(CkptCfg(out, cfg.ckpt_every, cfg.ckpt_keep, cfg.ckpt_every_last))
     target = cfg.sched.total_steps if stop_at is None else min(stop_at, cfg.sched.total_steps)
     print(f"{device}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params, B={cfg.batch_size}, "
@@ -147,10 +166,14 @@ def fit(cfg: RunCfg, root: str | None, out: str, resume: bool | str | None = Non
             logger.add(update, log)
             if log["did_step"]:
                 checkpointer.step(update, model, optimizer, scheduler, scaler, meta)
+                if cfg.val_every > 0 and update % cfg.val_every == 0 and update < cfg.sched.total_steps:
+                    run_val(update)
         # the loop ended normally (total_steps reached, or a deliberate stop_at): write this exact update as last.pt
         # AND a numbered file, whatever the cadences (one possibly redundant save per run). Never done on an exception.
         if update > start:
             checkpointer.step(update, model, optimizer, scheduler, scaler, meta, force=True)
+        if update == cfg.sched.total_steps and update > start:
+            run_val(update)
     finally:
         logger.close()
     elapsed = time.perf_counter() - t0
