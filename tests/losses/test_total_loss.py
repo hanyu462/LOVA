@@ -1,7 +1,7 @@
-"""lova.losses.total: weighted sum of the three losses on a synthetic model output + a real collated batch.
+"""lova.losses.total_loss: weighted sum of the three losses on a synthetic model output + a real collated batch.
 
-    python tests/losses/test_total.py                              # synthetic
-    python tests/losses/test_total.py --root datasets/coco         # + one real batch through random outputs
+    python tests/losses/test_total_loss.py                              # synthetic
+    python tests/losses/test_total_loss.py --root datasets/coco         # + one real batch through random outputs
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from lova.losses.heat_loss import heat_loss  # noqa: E402
 from lova.losses.mask_loss import mask_loss  # noqa: E402
 from lova.losses.r_loss import r_loss  # noqa: E402
-from lova.losses.total import REQUIRED_OUT, TotalLossCfg, total_loss, total_stats  # noqa: E402
+from lova.losses.total_loss import REQUIRED_OUT, TotalLossCfg, total_loss, total_stats  # noqa: E402
 
 
 def fake_out(B, K, D, S, device="cpu"):

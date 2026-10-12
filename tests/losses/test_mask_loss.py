@@ -58,10 +58,10 @@ def unit_test():
     for b in range(B):
         lg = dynamic_masks(kernel_map[b].detach(), mask_feat[b].detach(), pos_index[b])
         per.append(soft_dice_loss(lg, masks[b][pos_inst[b]], mask_valid[b]))
-    assert abs(float(l) - float(torch.cat(per).mean())) < 1e-6
+    assert abs(float(l.detach()) - float(torch.cat(per).mean())) < 1e-6
     # an image without positives is skipped; a batch without any positive gives 0 with a gradient path
     l2 = mask_loss(kernel_map, mask_feat, [pos_index[0], torch.zeros(0, dtype=torch.long)], [pos_inst[0], torch.zeros(0, dtype=torch.long)], masks, mask_valid)
-    assert abs(float(l2) - float(per[0].mean())) < 1e-6
+    assert abs(float(l2.detach()) - float(per[0].mean())) < 1e-6
     km2 = torch.randn(B, D, H8, W8, requires_grad=True)
     l0 = mask_loss(km2, mask_feat.detach(), [torch.zeros(0, dtype=torch.long)] * B, [torch.zeros(0, dtype=torch.long)] * B, masks, mask_valid)
     assert l0 == 0; l0.backward(); assert km2.grad is not None
