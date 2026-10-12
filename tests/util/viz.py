@@ -71,3 +71,24 @@ def hstack(images, titles=None, pad: int = 6) -> Image.Image:
             d.text((x + 4, 2), titles[k], fill=(255, 255, 255))
         x += im.width + pad
     return canvas
+
+
+def field_overlay(image: Image.Image, field: torch.Tensor, alpha: float = 0.7) -> Image.Image:
+    """A [0,1] field (any grid) drawn red (1) -> blue (0) over the image, upsampled with nearest so the
+    real cells stay visible."""
+    f = field.detach().float().cpu()
+    f = torch.nn.functional.interpolate(f[None, None], size=(image.height, image.width), mode="nearest")[0, 0]
+    base = torch.from_numpy(np.array(image.convert("RGB"))).permute(2, 0, 1).float() / 255
+    h = torch.stack([f, torch.zeros_like(f), 1 - f], 0) * alpha + base * (1 - alpha)
+    return Image.fromarray((h.clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8))
+
+
+def vstack(images, pad: int = 6) -> Image.Image:
+    w = max(im.width for im in images)
+    h = sum(im.height for im in images) + pad * (len(images) - 1)
+    canvas = Image.new("RGB", (w, h), (30, 30, 30))
+    y = 0
+    for im in images:
+        canvas.paste(im, (0, y))
+        y += im.height + pad
+    return canvas
