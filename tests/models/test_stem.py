@@ -23,6 +23,17 @@ def unit_test():
     assert f0.shape == (2, 64, 160, 160)
     assert stem(torch.randn(1, 3, 96, 128)).shape == (1, 64, 24, 32)      # rectangular input is fine
     assert Stem(32)(x).shape == (2, 32, 160, 160)
+    for bad in (torch.randn(1, 3, 100, 128), torch.randn(1, 3, 128, 96 + 8), torch.randn(3, 128, 128),
+                torch.randn(1, 3, 0, 64), torch.randn(1, 1, 64, 64)):
+        try:
+            stem(bad); raise AssertionError("must raise")
+        except ValueError:
+            pass
+    for bad_c0 in (0, 1, 65, -2):
+        try:
+            Stem(bad_c0); raise AssertionError("must raise")
+        except ValueError:
+            pass
     f0.sum().backward()
     assert all(p.grad is not None for p in stem.parameters())
     n = count_params(stem)

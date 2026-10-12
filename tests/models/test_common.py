@@ -25,13 +25,18 @@ def unit_test():
     assert ConvGNAct(16, 24, s=2)(x).shape == (2, 24, 16, 16)
     assert ConvGNAct(16, 24, d=2)(x).shape == (2, 24, 32, 32)          # dilation keeps the size
     assert PreActConv(16, 8)(x).shape == (2, 8, 32, 32)
-    # ResBlock is the identity when fresh, and not after a weight change
+    # ResBlock is the identity when fresh; on the first backward only the second conv gets residual gradient
     blk = ResBlock(16)
     assert torch.equal(blk(x), x)
-    blk.body[1][2].weight.data.normal_()
+    blk(x).square().sum().backward()
+    conv1, gn1, gn2, conv2 = blk.body[0][2], blk.body[0][0], blk.body[1][0], blk.body[1][2]
+    assert float(conv2.weight.grad.abs().sum()) > 0
+    assert all(float(q.grad.abs().sum()) == 0 for q in (conv1.weight, gn1.weight, gn1.bias, gn2.weight, gn2.bias))
+    # once the second conv is non-zero the block is no longer the identity and the whole body gets gradient
+    blk.zero_grad(); conv2.weight.data.normal_()
     assert not torch.allclose(blk(x), x)
-    blk(x).sum().backward()
-    assert all(p.grad is not None for p in blk.parameters())
+    blk(x).square().sum().backward()
+    assert all(float(q.grad.abs().sum()) > 0 for q in blk.parameters())
     # coord_grid matches geometry.pointer_to_stride: the pixel at a cell centre maps to that integer cell
     g = coord_grid(4, 6, 8)
     assert g.shape == (2, 4, 6) and float(g[0, 0, 0]) == 3.5 and float(g[1, 0, 0]) == 3.5 and float(g[0, 0, 1]) == 11.5
@@ -42,11 +47,24 @@ def unit_test():
     out = ModelOutput(torch.rand(B, 1, S // 4, S // 4), torch.randn(B, K, S // 8, S // 8),
                       torch.randn(B, D, S // 8, S // 8), torch.randn(B, D, S // 4, S // 4))
     out.check((B, 3, S, S), K)
-    assert set(out.as_dict()) == {"r_pred", "heat_logits", "kernel_map", "mask_feat"}
+    assert set(out.as_dict()) == {"r_pred", "heat_logits", "kernel_map", "mask_feat"}          # r_gate never reaches the losses
+    ModelOutput(**out.as_dict(), r_gate=out.r_pred * 0.5).check((B, 3, S, S), K)
+    for bad_gate in (out.r_pred[:, :, :-1], out.r_pred * 2, out.r_pred * float("nan")):
+        try:
+            ModelOutput(**out.as_dict(), r_gate=bad_gate).check((B, 3, S, S), K); raise AssertionError("must raise")
+        except ValueError:
+            pass
+    for bad_call in (((B, S, S), K), ((B, 1, S, S), K), ((B, 3, S, S), 0)):
+        try:
+            out.check(*bad_call); raise AssertionError("must raise")
+        except ValueError:
+            pass
     for bad in (ModelOutput(out.r_pred[:, :, :-1], out.heat_logits, out.kernel_map, out.mask_feat),
                 ModelOutput(out.r_pred, out.heat_logits[:, :-1], out.kernel_map, out.mask_feat),
                 ModelOutput(out.r_pred, out.heat_logits, out.kernel_map, out.mask_feat[:, :-1]),
-                ModelOutput(out.r_pred * 2, out.heat_logits, out.kernel_map, out.mask_feat)):
+                ModelOutput(out.r_pred * 2, out.heat_logits, out.kernel_map, out.mask_feat),
+                ModelOutput(out.r_pred, out.heat_logits, out.kernel_map[0], out.mask_feat),                 # 3-D
+                ModelOutput(out.r_pred, out.heat_logits * float("nan"), out.kernel_map, out.mask_feat)):   # NaN
         try:
             bad.check((B, 3, S, S), K)
             raise AssertionError("must raise")

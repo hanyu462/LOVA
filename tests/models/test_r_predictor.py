@@ -49,13 +49,32 @@ def unit_test():
     assert not torch.allclose(r1, r2)
     # and the same pointer gives the same R regardless of batch position
     assert torch.allclose(rp(f0[:1], p[:1], S), rp(f0, p, S)[:1], atol=1e-5)
-    # ---- through r_loss: gradient reaches every parameter of predictor and stem ----
+    # config and call contracts
+    for bad_cfg in (RPredictorCfg(c=0), RPredictorCfg(sigma_frac=0.0), RPredictorCfg(init_r=0.0), RPredictorCfg(init_r=1.0)):
+        try:
+            RPredictor(c0, bad_cfg); raise AssertionError("must raise")
+        except ValueError:
+            pass
+    for bad_args in ((f0, p[:1], S), (f0[:, :, :-1], p, S), (f0, p, 0), (f0[0], p, S),
+                     (f0[:, :-1], p, S), (torch.randn(2, c0, 0, 8), p, S)):                   # wrong channels, h = 0
+        try:
+            rp(*bad_args); raise AssertionError("must raise")
+        except ValueError:
+            pass
+    # ---- through r_loss ----
     stem = Stem(c0)
     img = torch.randn(2, 3, S, S)
     r_gt = torch.rand(2, h, w); r_valid = torch.ones(2, h, w, dtype=torch.bool); r_valid[:, :, -3:] = False
-    loss = r_loss(rp(stem(img), p, S), r_gt, r_valid)
-    loss.backward()
-    assert all(p_.grad is not None and torch.isfinite(p_.grad).all() for p_ in list(rp.parameters()) + list(stem.parameters()))
+    # (a) FRESH predictor (out.weight = 0): only out.* gets a non-zero gradient on the first backward;
+    #     upstream layers and the stem receive exactly zero -> the documented one-step delay
+    rp_fresh = RPredictor(c0, RPredictorCfg(c=16))
+    r_loss(rp_fresh(stem(img), p, S), r_gt, r_valid).backward()
+    assert float(rp_fresh.out.weight.grad.abs().sum()) > 0 and float(rp_fresh.out.bias.grad.abs().sum()) > 0
+    assert all(float(p_.grad.abs().sum()) == 0 for p_ in list(rp_fresh.inp.parameters()) + list(stem.parameters()))
+    stem.zero_grad()
+    # (b) with a non-zero output layer (rp, randomised above) the gradient reaches every parameter of predictor and stem
+    r_loss(rp(stem(img), p, S), r_gt, r_valid).backward()
+    assert all(p_.grad is not None and float(p_.grad.abs().sum()) > 0 for p_ in list(rp.parameters()) + list(stem.parameters()))
     # ---- learnability: fit one image with its R_GT = the pointer gaussian ----
     rp2, st2 = RPredictor(c0, RPredictorCfg(c=16)), Stem(c0)
     opt = torch.optim.Adam(list(rp2.parameters()) + list(st2.parameters()), lr=2e-3)

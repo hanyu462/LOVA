@@ -12,8 +12,12 @@
 
     L = w_r * L_R + w_heat * L_heat + w_mask * L_mask
 
-The default weights (1, 1, 1) are integration placeholders, not a decision: once a model produces a
-batch, look at the raw magnitudes and the gradient scale on the shared backbone, then set them.
+Weights (1, 1, 3): the initial V0 setting, chosen from the 9-5 warm-up diagnostics (300 steps, B=8):
+the median gradient norms at F0 were R : heat : mask = 0.030 : 1 : 0.39, so w_mask = 3 brings the two
+segmentation branches to the same scale. L_R is an auxiliary objective that keeps the R predictor on
+R_GT, not a third term to equalise (equalising would need w_r ~ 33 and let R_GT reproduction dominate
+the shared stem); w_r = 1 already drove L_R 0.176 -> 0.051 in the warm-up. Raise w_r (2, 4) only if
+segmentation improves while r_pred stops following R_GT. Not theoretically fixed; revisit in training.
 """
 from __future__ import annotations
 
@@ -31,9 +35,9 @@ REQUIRED_BATCH = ("r_gt", "r_valid", "heat", "heat_valid", "pos_index", "pos_ins
 
 @dataclass(frozen=True)
 class TotalLossCfg:
-    w_r: float = 1.0        # placeholders until a real batch shows the raw magnitudes
+    w_r: float = 1.0        # auxiliary R supervision (see module docstring)
     w_heat: float = 1.0
-    w_mask: float = 1.0
+    w_mask: float = 3.0     # brings the mask branch's F0 gradient to the heat branch's scale
     r: RLossCfg = field(default_factory=RLossCfg)
     heat: HeatLossCfg = field(default_factory=HeatLossCfg)
     mask: MaskLossCfg = field(default_factory=MaskLossCfg)

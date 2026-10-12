@@ -1,1 +1,1 @@
-"""models: output.py (the output contract), common.py (blocks), stem.py, r_predictor.py, then backbone / neck / head."""
+"""models: output.py (the output contract), common.py (blocks), stem, r_predictor, backbone, neck, head, and lova.py (the wiring)."""

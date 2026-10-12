@@ -52,9 +52,9 @@ def unit_test():
     assert L["total"].requires_grad and not L["r_raw"].requires_grad
     L["total"].backward()
     assert all(torch.isfinite(out[k].grad).all() for k in REQUIRED_OUT)
-    # defaults are 1, 1, 1 placeholders
+    # defaults are the V0 setting (1, 1, 3)
     L1 = total_loss({k: v.detach() for k, v in out.items()}, batch)
-    assert torch.allclose(L1["total"], lr.detach() + lh.detach() + lm.detach())
+    assert torch.allclose(L1["total"], lr.detach() + lh.detach() + 3.0 * lm.detach())
     # stats reuse the computed mask loss, all 0-d tensors
     st = total_stats(out, batch, L1)
     for k in ("r_mae", "r_lit_pred", "r_lit_gt", "n_pos", "p_pos", "p_neg", "n_pos_cells", "dice"):

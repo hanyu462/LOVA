@@ -6,7 +6,13 @@
 The pointer enters the network ONLY here (the backbone, neck and head never see it): everything
 pointer-specific must be expressed through R. The context path (stride 16, dilations 2 and 4) gives
 R a receptive field of a few hundred pixels so it can follow an object away from the pointer; the
-skip path keeps the stride-4 detail. r_pred starts as the constant `init_r` (zero output weights).
+skip path keeps the stride-4 detail. r_pred starts as the constant `init_r` (zero output weights):
+on the very first backward only `out.weight` and `out.bias` receive predictor-branch gradient; everything
+upstream (and the stem, via r_loss) starts moving from the second step, once `out.weight` is non-zero.
+One-step delay, by choice.
+
+canvas: the reference side length that normalises BOTH x and y pointer offsets. LOVA V0 passes the
+square input side S (Lova enforces H == W); the predictor itself accepts rectangular F0.
 
 pointer_maps uses cell centres (coord_grid), so the gaussian peaks on the cell that contains the
 pointer, consistent with the R_GT geometry.
@@ -43,8 +49,14 @@ def pointer_maps(pointer: torch.Tensor, h: int, w: int, stride: int, canvas: int
 class RPredictor(nn.Module):
     def __init__(self, c0: int = 64, cfg: RPredictorCfg = RPredictorCfg(), stride: int = 4):
         super().__init__()
+        if c0 <= 0 or cfg.c <= 0 or stride <= 0:
+            raise ValueError(f"c0 / c / stride must be > 0, got {c0} / {cfg.c} / {stride}")
+        if cfg.sigma_frac <= 0:
+            raise ValueError(f"sigma_frac must be > 0, got {cfg.sigma_frac}")
+        if not 0.0 < cfg.init_r < 1.0:
+            raise ValueError(f"init_r must lie in (0, 1) (its logit is the output bias), got {cfg.init_r}")
         c, cp = cfg.c, POINTER_CHANNELS
-        self.cfg, self.stride = cfg, stride
+        self.cfg, self.stride, self.c0 = cfg, stride, c0
         self.inp = ConvGNAct(c0 + cp, c)
         self.down1 = ConvGNAct(c, c, s=2)
         self.down2 = ConvGNAct(c, c, s=2)
@@ -56,6 +68,15 @@ class RPredictor(nn.Module):
 
     def forward(self, f0: torch.Tensor, pointer: torch.Tensor, canvas: int) -> torch.Tensor:
         """f0 [B,c0,h,w] (stride 4), pointer [B,2] px, canvas = input side S -> [B,1,h,w] in (0,1)."""
+        if f0.dim() != 4 or f0.shape[1] != self.c0:
+            raise ValueError(f"f0 must be [B,{self.c0},h,w], got {tuple(f0.shape)}")
+        h, w = f0.shape[-2:]
+        if h < 4 or w < 4 or h % 4 or w % 4:
+            raise ValueError(f"h, w must be positive multiples of 4 (two stride-2 steps), got {h}x{w}")
+        if pointer.shape != (f0.shape[0], 2) or pointer.device != f0.device:
+            raise ValueError(f"pointer must be [B,2] on {f0.device}, got {tuple(pointer.shape)} on {pointer.device}")
+        if canvas <= 0:
+            raise ValueError(f"canvas must be > 0, got {canvas}")
         b, _, h, w = f0.shape
         p_hi = pointer_maps(pointer, h, w, self.stride, canvas, self.cfg.sigma_frac).to(f0.dtype)
         x = self.inp(torch.cat([f0, p_hi], 1))

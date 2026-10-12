@@ -1,6 +1,7 @@
 """Step 9-1: building blocks shared by every model part. No task logic here.
 
-    gn(c)                GroupNorm with the largest group count (<= 32) dividing c; batch-size independent
+    gn(c)                GroupNorm; starting from max_groups (32) the group count is halved until it divides c
+                         (c = 24 -> 8 groups, not 24); batch-size independent
     ConvGNAct            Conv -> GN -> GELU               (post-activation; stems, necks, heads)
     PreActConv           GN -> GELU -> Conv               (pre-activation; inside residual streams)
     ResBlock             x + PreActConv(PreActConv(x))    (the ungated residual unit; 9-3 wraps it with a gate)
@@ -33,7 +34,10 @@ class PreActConv(nn.Sequential):
 
 class ResBlock(nn.Module):
     """Two pre-activation 3x3 convs on a residual stream of width c. The second conv starts at zero,
-    so a fresh block is the identity and a deep stack trains from a sane starting point."""
+    so a fresh block is exactly the identity and a deep stack trains from a sane starting point.
+    Consequently, on the first backward pass only the second conv receives residual-branch gradient;
+    the first conv and both GN affines start receiving gradient once that conv is non-zero (one-step
+    delay, as in the R predictor's output layer)."""
 
     def __init__(self, c: int):
         super().__init__()
