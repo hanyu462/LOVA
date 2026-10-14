@@ -44,6 +44,7 @@ def unit_test():
     cfg = replace(RunCfg(), model=SMALL, train=TrainCfg(amp=False), optim=OptimCfg(lr=1e-3), sched=SchedCfg(total_steps=20, warmup_steps=4),
                   batch_size=B, log_every=5, log_window=10, ckpt_every=10, ckpt_keep=2, ckpt_every_last=4)
     assert "data" in run_meta(cfg, K) and "workers" not in run_meta(cfg, K)
+    assert run_meta(replace(cfg, train_r_override=1.0), K) != run_meta(cfg, K)        # the gate policy is part of the meta
     g = infinite_batches(FakeLoader(3))
     assert all(isinstance(next(g), dict) for _ in range(8))                                   # restarts past 3
     with tempfile.TemporaryDirectory() as d:

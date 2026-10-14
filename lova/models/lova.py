@@ -56,7 +56,9 @@ class Lova(nn.Module):
         self.head = Head(num_classes, cfg.head)
 
     def forward_with_intermediates(self, image: torch.Tensor, pointer: torch.Tensor, valid: torch.Tensor | None = None,
-                                   r_override=None) -> tuple[ModelOutput, dict]:
+                                   r_override=None, detach_r: bool = False) -> tuple[ModelOutput, dict]:
+        """detach_r: the backbone runs on r_pred.detach(), so the segmentation losses cannot reach the predictor
+        (ablation: the predictor then learns R_GT only). r_pred itself is returned with its graph for r_loss."""
         if image.dim() != 4 or image.shape[1] != 3:
             raise ValueError(f"image must be [B,3,H,W], got {tuple(image.shape)}")
         if image.shape[-2] != image.shape[-1]:
@@ -69,15 +71,16 @@ class Lova(nn.Module):
         f0 = self.stem(image)
         r_pred = self.r_predictor(f0, pointer, canvas=image.shape[-1])
         valid_s4 = None if valid is None else valid_to_stride(valid, 4)
-        r_gate = resolve_r(r_pred, valid_s4, r_override)
+        r_gate = resolve_r(r_pred.detach() if detach_r else r_pred, valid_s4, r_override)
         feats = self.backbone(f0, r_gate, valid_s4)
         neck = self.neck(feats)
         head = self.head(neck)
         out = ModelOutput(r_pred=r_pred, r_gate=r_gate, **head)
         return out, {"f0": f0, "feats": feats, "neck": neck, "valid_s4": valid_s4}
 
-    def forward(self, image: torch.Tensor, pointer: torch.Tensor, valid: torch.Tensor | None = None, r_override=None) -> ModelOutput:
-        return self.forward_with_intermediates(image, pointer, valid, r_override)[0]
+    def forward(self, image: torch.Tensor, pointer: torch.Tensor, valid: torch.Tensor | None = None, r_override=None,
+                detach_r: bool = False) -> ModelOutput:
+        return self.forward_with_intermediates(image, pointer, valid, r_override, detach_r)[0]
 
     def parts(self) -> dict:
         return {"stem": self.stem, "r_predictor": self.r_predictor, "backbone": self.backbone, "neck": self.neck, "head": self.head}

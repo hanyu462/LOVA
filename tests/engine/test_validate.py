@@ -12,7 +12,7 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lova.engine.validate import OVERRIDES, ValCfg, ValSet, format_val, val_loader, validate  # noqa: E402
+from lova.engine.validate import PRIOR, OVERRIDES, SHUFFLED, ValCfg, ValSet, format_val, matched, val_loader, validate  # noqa: E402
 from lova.losses.total_loss import TotalLossCfg  # noqa: E402
 from lova.models.lova import Lova  # noqa: E402
 from tests.models.test_lova import SMALL, fake_batch  # noqa: E402
@@ -37,8 +37,8 @@ def unit_test():
     b = validate(model, loader, amp_dtype=None)
     assert a == b, "validation must be deterministic"                                       # same model, same batches
     assert a["n_images"] == 5 and set(a["sweep"]) == {"predicted", "R=0", "R=0.5", "R=1"}
-    assert set(a["predicted"]) == {"r_loss", "r_mae", "total", "heat_loss", "mask_loss", "dice", "budget"}
-    assert all(set(s) == {"heat_loss", "mask_loss", "dice", "budget"} for s in a["sweep"].values())     # no r terms in the sweep
+    assert set(a["predicted"]) == {"r_loss", "r_mae", "total", "heat_loss", "mask_loss", "dice", "budget", "pointed_dice"}
+    assert all(set(s) == {"heat_loss", "mask_loss", "dice", "budget", "pointed_dice"} for s in a["sweep"].values())   # no r terms in the sweep
     # budgets: constants on a half-padded canvas (fake_batch pads the bottom half) are exact
     assert abs(a["sweep"]["R=0"]["budget"]) < 1e-6 and abs(a["sweep"]["R=0.5"]["budget"] - 0.5) < 1e-6 and abs(a["sweep"]["R=1"]["budget"] - 1.0) < 1e-6
     # a fresh model (zero-init blocks): R cannot matter, all conditions equal; after randomising the blocks they differ
@@ -53,6 +53,12 @@ def unit_test():
     d = validate(model, loader5, amp_dtype=None)
     assert abs(d["predicted"]["heat_loss"] - c["predicted"]["heat_loss"]) < 2e-2 * max(1.0, abs(c["predicted"]["heat_loss"]))   # focal normalises per batch: close, not equal
     assert abs(d["sweep"]["R=1"]["budget"] - c["sweep"]["R=1"]["budget"]) < 1e-6
+    # callable overrides: oracle budget equals the R_GT budget, shuffled budget equals the predicted budget (rolled fields)
+    e = validate(model, loader, overrides=list(OVERRIDES) + [matched(0.3), PRIOR, SHUFFLED], amp_dtype=None)
+    assert set(e["sweep"]) == {"predicted", "R=0", "R=0.5", "R=1", "R=0.300", "R_GT", "shuffled"}
+    assert abs(e["sweep"]["R=0.300"]["budget"] - 0.3) < 1e-6
+    assert abs(e["sweep"]["shuffled"]["budget"] - e["sweep"]["predicted"]["budget"]) < 0.05        # same fields, other images (valid masks equal here)
+    assert e["sweep"]["R_GT"]["budget"] > 0
     # total is the weighted sum of the predicted-R terms; model is left in its previous mode
     w = TotalLossCfg()
     p = c["predicted"]

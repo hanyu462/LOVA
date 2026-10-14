@@ -25,7 +25,7 @@ initialisation has already consumed, so two architectures with the same seed do 
 data order. A dedicated loader generator (with its state in the checkpoint) is the fix when strict
 A/B ablations start. The checkpoint
 meta must match this run's (data, model, loss, train, optim, sched, num_classes, batch_size, split,
-seed): everything that changes what is optimised. Output dir, log cadence, checkpoint cadence and
+seed, train_r_override, detach_r): everything that changes what is optimised. Output dir, log cadence, checkpoint cadence and
 worker count are not part of it.
 """
 from __future__ import annotations
@@ -61,6 +61,8 @@ class RunCfg:
     split: str = "train2017"
     batch_size: int = 8
     seed: int = 0
+    train_r_override: float | None = None   # None: predicted R (LOVA); 1.0: dense A0 baseline; other constants for sweeps
+    detach_r: bool = False                  # ablation: segmentation losses do not reach the R predictor
     # not part of the checkpoint meta
     workers: int = 8
     log_every: int = 20
@@ -75,7 +77,8 @@ class RunCfg:
 
 def run_meta(cfg: RunCfg, num_classes: int) -> dict:
     return to_meta(data=cfg.data, model=cfg.model, loss=cfg.loss, train=cfg.train, optim=cfg.optim, sched=cfg.sched,
-                   num_classes=num_classes, batch_size=cfg.batch_size, split=cfg.split, seed=cfg.seed)
+                   num_classes=num_classes, batch_size=cfg.batch_size, split=cfg.split, seed=cfg.seed,
+                   train_r_override=cfg.train_r_override, detach_r=cfg.detach_r)
 
 
 def build_loader(cfg: RunCfg, root: str, device: torch.device) -> tuple[DataLoader, int]:
@@ -153,13 +156,15 @@ def fit(cfg: RunCfg, root: str | None, out: str, resume: bool | str | None = Non
 
     checkpointer = Checkpointer(CkptCfg(out, cfg.ckpt_every, cfg.ckpt_keep, cfg.ckpt_every_last))
     target = cfg.sched.total_steps if stop_at is None else min(stop_at, cfg.sched.total_steps)
+    gate = "predicted R" if cfg.train_r_override is None else f"R={cfg.train_r_override:g} (override)"
     print(f"{device}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params, B={cfg.batch_size}, "
-          f"amp={cfg.train.amp_dtype if cfg.train.amp else 'off'}, updates {update} -> {target} (total {cfg.sched.total_steps})")
+          f"amp={cfg.train.amp_dtype if cfg.train.amp else 'off'}, gate {gate}{', detach_r' if cfg.detach_r else ''}, "
+          f"updates {update} -> {target} (total {cfg.sched.total_steps})")
     batches = infinite_batches(loader)
     t0, start, attempts = time.perf_counter(), update, 0
     try:
         while update < target:
-            log = train_step(model, next(batches), optimizer, scheduler, cfg.loss, cfg.train, scaler)
+            log = train_step(model, next(batches), optimizer, scheduler, cfg.loss, cfg.train, scaler, cfg.train_r_override, cfg.detach_r)
             attempts += 1
             if log["did_step"]:
                 update += 1

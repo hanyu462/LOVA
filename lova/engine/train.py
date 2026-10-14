@@ -78,8 +78,9 @@ def to_device(batch: dict, device: torch.device | str) -> dict:
 
 
 def train_step(model: nn.Module, batch: dict, optimizer: torch.optim.Optimizer, scheduler, loss_cfg: TotalLossCfg = TotalLossCfg(),
-               cfg: TrainCfg = TrainCfg(), scaler: torch.amp.GradScaler | None = None) -> dict:
-    """One update. Returns detached 0-d tensors (losses, grad_norm, r_budget, clipped) plus python values
+               cfg: TrainCfg = TrainCfg(), scaler: torch.amp.GradScaler | None = None, r_override=None, detach_r: bool = False) -> dict:
+    """One update. r_override (e.g. 1.0 for the dense A0 baseline) / detach_r (predictor learns R_GT only) are the
+    training-time gate policy and belong to the run meta. Returns detached 0-d tensors (losses, grad_norm, r_budget, clipped) plus python values
     (lr used, did_step, scale). Without a scaler, a non-finite loss or gradient raises FloatingPointError
     before the optimizer is touched."""
     dtype = amp_dtype(cfg)
@@ -90,7 +91,7 @@ def train_step(model: nn.Module, batch: dict, optimizer: torch.optim.Optimizer, 
     model.train()
     optimizer.zero_grad(set_to_none=True)
     with torch.autocast(device.type, dtype=dtype if dtype is not None else torch.float32, enabled=dtype is not None):
-        out = model(batch["image"], batch["pointer"], batch["valid"])          # plain forward; intermediates are for diagnostics
+        out = model(batch["image"], batch["pointer"], batch["valid"], r_override, detach_r)   # plain forward; intermediates are for diagnostics
         losses = total_loss(out.as_dict(), batch, loss_cfg)
     total = losses["total"]
     lr = optimizer.param_groups[0]["lr"]

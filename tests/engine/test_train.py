@@ -55,6 +55,12 @@ def unit_test():
         assert torch.allclose(log["total"], log["r"] + log["heat"] + log["mask"]) and torch.allclose(log["mask"], 3 * log["mask_raw"])
         assert all(not log[k].requires_grad for k in ("total", "r_raw", "heat_raw", "mask_raw", "r", "heat", "mask", "grad_norm", "clipped", "r_budget"))
         assert all(log[k].dim() == 0 for k in ("total", "r_raw", "heat_raw", "mask_raw", "r", "heat", "mask", "grad_norm", "clipped", "r_budget"))
+    # ---- A2. training-time gate policy: an override fixes the budget, detach_r keeps the predictor out of the task losses ----
+    model, opt, sch, _ = fresh(TrainCfg(amp=False))
+    log = train_step(model, fake_batch(B, K, S), opt, sch, TotalLossCfg(), TrainCfg(amp=False), r_override=1.0)
+    assert abs(float(log["r_budget"]) - 1.0) < 1e-6 and torch.isfinite(log["total"])
+    log = train_step(model, fake_batch(B, K, S), opt, sch, TotalLossCfg(), TrainCfg(amp=False), detach_r=True)
+    assert torch.isfinite(log["total"]) and sch.last_epoch == 2
     # ---- B. clipping: pre-clip norm reported, the update uses the clipped gradient (SGD: delta = -lr * g_clipped) ----
     cfg = TrainCfg(amp=False, grad_clip_norm=1.0)
     model, opt, sch, _ = fresh(cfg, "sgd", lr=1.0)

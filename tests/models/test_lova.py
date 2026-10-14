@@ -42,7 +42,7 @@ def fake_batch(B, K, S):
     return {"image": torch.randn(B, 3, S, S), "pointer": torch.tensor([[10.0, 12.0]] * B), "valid": valid,
             "r_gt": torch.rand(B, H4, H4), "r_valid": torch.ones(B, H4, H4, dtype=torch.bool),
             "heat": heat, "heat_valid": torch.ones(B, H8, H8, dtype=torch.bool),
-            "pos_index": [torch.tensor([2 * H8 + 2])] * B, "pos_inst": [torch.tensor([0])] * B,
+            "pos_index": [torch.tensor([2 * H8 + 2])] * B, "pos_inst": [torch.tensor([0])] * B, "pointed_idx": [0] * B,
             "masks_s4": masks, "mask_valid": torch.ones(B, H4, H4, dtype=torch.bool)}
 
 
@@ -80,6 +80,19 @@ def unit_test():
     with torch.no_grad():
         on = model(batch["image"], batch["pointer"], None, r_override=1.0)
     assert float(on.r_gate.min()) == 1
+    # detach_r: r_pred keeps its graph (r_loss), but the task losses give the predictor no gradient
+    m2 = Lova(K, SMALL)
+    out_d = m2(batch["image"], batch["pointer"], batch["valid"], detach_r=True)
+    assert out_d.r_pred.requires_grad and not out_d.r_gate.requires_grad
+    (out_d.heat_logits.sum() + out_d.mask_feat.sum()).backward()
+    assert all(p.grad is None or float(p.grad.abs().sum()) == 0 for p in m2.r_predictor.parameters())
+    m2.zero_grad(); out_j = m2(batch["image"], batch["pointer"], batch["valid"])
+    torch.nn.init.normal_(m2.r_predictor.out.weight, std=0.5)       # non-zero output layer so the gate path is live
+    for p in m2.backbone.parameters():
+        if p.dim() == 4 and p.abs().sum() == 0: torch.nn.init.normal_(p, std=0.05)
+    out_j = m2(batch["image"], batch["pointer"], batch["valid"])
+    out_j.heat_logits.sum().backward()
+    assert any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in m2.r_predictor.parameters())   # joint: it does
     # intermediates expose F0 for the gradient diagnostics
     out2, inter = model.forward_with_intermediates(batch["image"], batch["pointer"], batch["valid"])
     assert inter["f0"].shape == (B, SMALL.c0, S // 4, S // 4) and set(inter["feats"]) == {"s4", "s8", "s16", "s32"}

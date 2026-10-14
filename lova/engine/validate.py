@@ -8,9 +8,17 @@
                                                 index -> the same (image, pointer) every time
     validate(model, loader, loss_cfg, overrides, amp_dtype) -> {
         "predicted": r_loss, r_mae, heat_loss, mask_loss, dice, budget, total     (the model as trained)
-        "sweep":     {"R=0", "R=0.5", "R=1", "predicted"}: heat_loss, mask_loss, dice, budget
+        "sweep":     {"R=0", "R=0.5", "R=1", "predicted", ...}: heat_loss, mask_loss, dice, budget, and
+                     pointed_dice = dice over the positive cells of the POINTED instance only (LOVA's premise is
+                     quality where the pointer is; the global dice counts every instance, most of them outside
+                     any R_GT field)
                      (r_loss / r_mae are NOT in the sweep: an override changes what the backbone runs on,
                       not the predictor's output; they stay a predicted-R quality metric)
+    overrides: (spec, name) pairs; spec is a float (constant R) or a callable (batch, predicted_out) -> [B,1,h,w]
+               field. Ready-made: matched(b) = constant b (the predicted budget, to separate "where" from
+               "how much"), PRIOR = R_GT itself (the pointer-conditioned resolution prior, not an optimal
+               allocation: on the 20k V0 it gives the best pointed dice and a much worse global dice), SHUFFLED = the predicted fields rolled across the batch
+               (same fields, wrong images: the budget distribution without the placement).
         "n_images" }
     Means are per-batch normalised metrics weighted by batch size: deterministic for a fixed loader (fixed
     subset, pointers, order and batch size) but not invariant to how the set is partitioned into batches.
@@ -37,6 +45,12 @@ from ..models.backbone import valid_to_stride
 from .train import to_device
 
 OVERRIDES = ((0.0, "R=0"), (0.5, "R=0.5"), (1.0, "R=1"))
+PRIOR = (lambda batch, out: batch["r_gt"][:, None].to(out.r_pred.dtype), "R_GT")      # the pointer prior itself as the gate
+SHUFFLED = (lambda batch, out: torch.roll(out.r_pred, 1, dims=0), "shuffled")
+
+
+def matched(budget: float):
+    return (float(budget), f"R={budget:.3f}")
 
 
 @dataclass(frozen=True)
@@ -97,22 +111,34 @@ def validate(model, loader, loss_cfg: TotalLossCfg = TotalLossCfg(), overrides=O
 def _validate(model, loader, loss_cfg, overrides, amp_dtype) -> dict:
     device = next(model.parameters()).device
     conds = [(None, "predicted")] + list(overrides)
-    acc = {name: {k: 0.0 for k in ("heat_loss", "mask_loss", "dice", "budget")} for _, name in conds}
+    acc = {name: {k: 0.0 for k in ("heat_loss", "mask_loss", "dice", "budget", "pointed_dice")} for _, name in conds}
     pred = {k: 0.0 for k in ("r_loss", "r_mae", "total")}
     n = 0
     for batch in loader:
         batch = to_device(batch, device)
         b = batch["image"].shape[0]
         valid_s4 = valid_to_stride(batch["valid"], 4)
+        # positives of the pointed instance only (local index lists, like pos_index / pos_inst)
+        p_index, p_inst = [], []
+        for pi, pinst, pointed in zip(batch["pos_index"], batch["pos_inst"], batch["pointed_idx"]):
+            keep = pinst == int(pointed)
+            p_index.append(pi[keep]); p_inst.append(pinst[keep])
         with torch.autocast(device.type, dtype=amp_dtype if amp_dtype is not None else torch.float32, enabled=amp_dtype is not None):
+            out_pred = None
             for ov, name in conds:
+                if callable(ov):
+                    ov = ov(batch, out_pred).clamp(0, 1)
                 out = model(batch["image"], batch["pointer"], batch["valid"], r_override=ov)
+                if name == "predicted":
+                    out_pred = out
                 hl = heat_loss(out.heat_logits, batch["heat"], batch["heat_valid"], loss_cfg.heat)
                 ml = mask_loss(out.kernel_map, out.mask_feat, batch["pos_index"], batch["pos_inst"], batch["masks_s4"], batch["mask_valid"], loss_cfg.mask)
                 ms = mask_stats(out.kernel_map, out.mask_feat, batch["pos_index"], batch["pos_inst"], batch["masks_s4"], batch["mask_valid"], loss=ml)
                 bud = model.backbone.gate_budget(out.r_gate, valid_s4).mean()
+                pl = mask_loss(out.kernel_map, out.mask_feat, p_index, p_inst, batch["masks_s4"], batch["mask_valid"], loss_cfg.mask)
                 a = acc[name]
                 a["heat_loss"] += float(hl) * b; a["mask_loss"] += float(ml) * b; a["dice"] += float(ms["dice"]) * b; a["budget"] += float(bud) * b
+                a["pointed_dice"] += float(1.0 - pl) * b
                 if ov is None:
                     rl = r_loss(out.r_pred, batch["r_gt"], batch["r_valid"], loss_cfg.r)
                     rs = r_stats(out.r_pred, batch["r_gt"], batch["r_valid"])
@@ -128,7 +154,7 @@ def format_val(res: dict, update: int | None = None) -> str:
     p = res["predicted"]
     head = f"[val{'' if update is None else f' @ {update:06d}'}] {res['n_images']} images"
     lines = [f"{head}: total {p['total']:.3f} | r {p['r_loss']:.4f} (mae {p['r_mae']:.3f}) heat {p['heat_loss']:.3f} mask {p['mask_loss']:.4f} | dice {p['dice']:.3f} | budget {p['budget']:.3f}",
-             f"  {'condition':10s} {'budget':>7s} {'heat':>8s} {'mask':>8s} {'dice':>7s}"]
+             f"  {'condition':10s} {'budget':>7s} {'heat':>8s} {'mask':>8s} {'dice':>7s} {'pointed':>8s}"]
     for name, s in res["sweep"].items():
-        lines.append(f"  {name:10s} {s['budget']:7.3f} {s['heat_loss']:8.3f} {s['mask_loss']:8.4f} {s['dice']:7.3f}")
+        lines.append(f"  {name:10s} {s['budget']:7.3f} {s['heat_loss']:8.3f} {s['mask_loss']:8.4f} {s['dice']:7.3f} {s['pointed_dice']:8.3f}")
     return "\n".join(lines)
