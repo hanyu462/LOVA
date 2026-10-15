@@ -93,6 +93,25 @@ def unit_test():
     out_j = m2(batch["image"], batch["pointer"], batch["valid"])
     out_j.heat_logits.sum().backward()
     assert any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in m2.r_predictor.parameters())   # joint: it does
+    # No-R baseline: no predictor parameters, pointer ignored, and bit-identical to the SAME weights run at R = 1
+    from dataclasses import replace
+    m_r = Lova(K, SMALL); m_nr = Lova(K, replace(SMALL, use_r=False))
+    assert m_nr.r_predictor is None and "r_predictor" not in m_nr.parts()
+    assert sum(p.numel() for p in m_nr.parameters()) == sum(p.numel() for p in m_r.parameters()) - sum(p.numel() for p in m_r.r_predictor.parameters())
+    m_nr.load_state_dict({k: v for k, v in m_r.state_dict().items() if not k.startswith("r_predictor.")})
+    for p in list(m_r.backbone.parameters()):
+        if p.dim() == 4 and p.abs().sum() == 0: torch.nn.init.normal_(p, std=0.05)
+    m_nr.load_state_dict({k: v for k, v in m_r.state_dict().items() if not k.startswith("r_predictor.")})
+    with torch.no_grad():
+        o_nr = m_nr(batch["image"], batch["pointer"], batch["valid"])
+        o_a0 = m_r(batch["image"], batch["pointer"], batch["valid"], r_override=1.0)
+        o_nr2 = m_nr(batch["image"], batch["pointer"] + 100.0, batch["valid"])
+    assert torch.equal(o_nr.heat_logits, o_a0.heat_logits) and torch.equal(o_nr.mask_feat, o_a0.mask_feat) and torch.equal(o_nr.r_gate, o_a0.r_gate)
+    assert torch.equal(o_nr.heat_logits, o_nr2.heat_logits)                                       # the pointer changes nothing
+    assert torch.equal(o_nr.r_pred, o_nr.r_gate) and float(o_nr.r_gate[:, :, S // 8:].max()) == 0 # reported R = the gate (1 inside the image)
+    o_nr3 = m_nr(batch["image"], batch["pointer"], batch["valid"])
+    total_loss(o_nr3.as_dict(), batch, TotalLossCfg(w_r=0.0))["total"].backward()
+    assert all(p.grad is not None for p in m_nr.stem.parameters())
     # intermediates expose F0 for the gradient diagnostics
     out2, inter = model.forward_with_intermediates(batch["image"], batch["pointer"], batch["valid"])
     assert inter["f0"].shape == (B, SMALL.c0, S // 4, S // 4) and set(inter["feats"]) == {"s4", "s8", "s16", "s32"}
